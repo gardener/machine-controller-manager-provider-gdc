@@ -1,0 +1,13 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
+aliases:
+  machine-controller-manager-provider-gdc-reviewers:
+  - AndreasBurger
+  - dilipkumar2k6
+  - HophinKibona
+  - fuzzdota
+  machine-controller-manager-provider-gdc-approvers:
+  - AndreasBurger
+  - dilipkumar2k6
+  - HophinKibona
+  - fuzzdota
