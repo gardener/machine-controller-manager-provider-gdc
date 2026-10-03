@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gardener/machine-controller-manager/pkg/apis/machine/v1alpha1"
@@ -33,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8swait "k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	klog "k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -115,31 +117,40 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 		return nil, wrapError(err)
 	}
 
-	if _, err := controllerutil.CreateOrUpdate(ctx, kubeClient, script, func() error {
-		return controllerutil.SetOwnerReference(vm, script, kubeClient.Scheme())
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, script, func() error {
+			return controllerutil.SetOwnerReference(vm, script, kubeClient.Scheme())
+		})
+		return err
 	}); err != nil {
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set owner reference on init script: %v", err))
 	}
 
 	if caInitScriptSecret != nil {
-		if _, err := controllerutil.CreateOrUpdate(ctx, kubeClient, caInitScriptSecret, func() error {
-			return controllerutil.SetOwnerReference(vm, caInitScriptSecret, kubeClient.Scheme())
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, caInitScriptSecret, func() error {
+				return controllerutil.SetOwnerReference(vm, caInitScriptSecret, kubeClient.Scheme())
+			})
+			return err
 		}); err != nil {
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set owner reference on ca init script: %v", err))
 		}
 	}
 
 	for _, disk := range disks {
-		vmd := &vmv1.VirtualMachineDisk{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      disk.VirtualMachineDiskRef.Name,
-				Namespace: spec.Project,
-			},
-		}
-		if _, err := controllerutil.CreateOrUpdate(ctx, kubeClient, vmd, func() error {
-			return controllerutil.SetOwnerReference(vm, vmd, kubeClient.Scheme())
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			vmd := &vmv1.VirtualMachineDisk{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      disk.VirtualMachineDiskRef.Name,
+					Namespace: spec.Project,
+				},
+			}
+			_, err := controllerutil.CreateOrUpdate(ctx, kubeClient, vmd, func() error {
+				return controllerutil.SetOwnerReference(vm, vmd, kubeClient.Scheme())
+			})
+			return err
 		}); err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set owner reference on disk %s", vmd.Name))
+			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to set owner reference on disk %s", disk.VirtualMachineDiskRef.Name))
 		}
 	}
 
@@ -175,6 +186,9 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 			case vmv1.VirtualMachineStateErrorConfiguration,
 				vmv1.VirtualMachineStateDiskError,
 				vmv1.VirtualMachineStateCrashLoopBackoff:
+				if strings.Contains(currentVM.Status.Message, "pending IP from Subnet") {
+					return false, nil
+				}
 				return false, status.Error(codes.Internal, fmt.Sprintf("VM %s is in error state %q: %s - %s", vm.Name, currentVM.Status.State, currentVM.Status.Reason, currentVM.Status.Message))
 			}
 			return false, nil

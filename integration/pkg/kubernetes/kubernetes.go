@@ -25,7 +25,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
+	clientwatch "k8s.io/client-go/tools/watch"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -135,30 +137,32 @@ func WaitForCondition[T runtime.Object](
 	startWatch func() (watch.Interface, error),
 	isReady func(obj T) bool,
 ) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	watcher, err := startWatch()
-	if err != nil {
-		return fmt.Errorf("failed to start watch: %w", err)
-	}
-	defer watcher.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for condition")
-		case event, ok := <-watcher.ResultChan():
-			if !ok {
-				return fmt.Errorf("watch channel closed")
-			}
-			obj, ok := event.Object.(T)
-			if !ok {
-				continue
-			}
-			if isReady(obj) {
-				return nil
-			}
+	// PollUntilContextTimeout retries establishing the watch on transient connection errors
+	// and re-establishes the watch stream if it is closed or refreshed before timeout.
+	return wait.PollUntilContextTimeout(ctx, 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		watcher, err := startWatch()
+		if err != nil {
+			// Transient error starting the watch; return false, nil to retry after the poll interval.
+			return false, nil
 		}
-	}
+
+		// Bound each watch session to 30s so idle TCP connections dropped silently by
+		// outbound NAT gateways on external CI runners (such as while waiting ~90s for
+		// a GDC VM to boot) reconnect and emit fresh state.
+		watchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		// UntilWithoutRetry consumes events from watcher (and stops it on exit) until
+		// the condition returns true, the channel closes, or watchCtx expires.
+		_, err = clientwatch.UntilWithoutRetry(watchCtx, watcher, func(event watch.Event) (bool, error) {
+			obj, ok := event.Object.(T)
+			return ok && isReady(obj), nil
+		})
+		if err != nil {
+			// If the overall timeout context is still active (ctx.Err() == nil),
+			// return false, nil to reconnect on the next poll cycle.
+			return false, ctx.Err()
+		}
+		return true, nil
+	})
 }

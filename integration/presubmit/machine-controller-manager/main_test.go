@@ -51,18 +51,12 @@ func TestMCM(t *testing.T) {
 		t.Fatalf("Failed to setup RBAC: %v", err)
 	}
 
-	// Create Image Pull Secret
-	imagePullSecretName, err := createImagePullSecret(ctx, t, env)
-	if err != nil {
-		t.Fatalf("Failed to create image pull secret: %v", err)
-	}
-
 	// Create Provider Secrets
 	if err := createMCMSecret(ctx, t, env); err != nil {
 		t.Fatalf("Failed to create credential secret: %v", err)
 	}
 
-	err = deployMCM(ctx, t, env, imagePullSecretName)
+	err = deployMCM(ctx, t, env)
 	if err != nil {
 		t.Fatalf("Failed to deploy MCM: %v", err)
 	}

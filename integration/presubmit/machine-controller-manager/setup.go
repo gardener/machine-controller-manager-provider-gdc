@@ -25,6 +25,7 @@ import (
 	"github.com/gardener/gardener/pkg/component/nodemanagement/machinecontrollermanager"
 	machinev1alpha1 "github.com/gardener/machine-controller-manager/pkg/apis/machine/v1alpha1"
 	vmv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/virtualmachine/v1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -66,6 +67,9 @@ func bootstrapTestEnv(_ context.Context, t *testing.T) (*TestEnv, error) {
 	}
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("failed to add appsv1 to scheme: %v", err)
+	}
+	if err := admissionregistrationv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add admissionregistrationv1 to scheme: %v", err)
 	}
 	caData, err := os.ReadFile(cfg.CAFile)
 	if err != nil {
@@ -122,17 +126,10 @@ func installCRDs(ctx context.Context, t *testing.T, vucClient client.WithWatch) 
 	if err != nil {
 		return fmt.Errorf("failed to create CRD deployer: %v", err)
 	}
-	t.Cleanup(func() {
-		t.Log("Cleaning up Machine CRDs...")
-		// Use Background context to ensure cleanup runs even if test context is cancelled
-		// We use a short timeout for cleanup to avoid blocking indefinitely
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-		if err := mcmDeployer.Destroy(cleanupCtx); err != nil {
-			t.Logf("Failed to destroy CRDs: %v", err)
-		}
-	})
-
+	// Do not destroy the cluster-scoped Machine CRDs in t.Cleanup(): multiple CI runs
+	// share the gardener-github-ci VUC, and deleting the CRDs on exit wipes out custom
+	// resources belonging to any concurrent test run. Namespaced Machine* objects are
+	// cleaned up by createMachineDeployment/createMachineClass and namespace deletion.
 	if err := mcmDeployer.Deploy(ctx); err != nil {
 		return fmt.Errorf("failed to deploy CRDs: %v", err)
 	}
@@ -177,8 +174,14 @@ func createMCMSecret(ctx context.Context, t *testing.T, testEnv *TestEnv) error 
 	}
 
 	t.Cleanup(func() {
-		err := testEnv.VucClient.Delete(context.Background(), secret)
-		if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		current := &corev1.Secret{}
+		if err := testEnv.VucClient.Get(cleanupCtx, client.ObjectKeyFromObject(secret), current); err == nil && len(current.Finalizers) > 0 {
+			current.Finalizers = nil
+			_ = testEnv.VucClient.Update(cleanupCtx, current)
+		}
+		if err := testEnv.VucClient.Delete(cleanupCtx, secret); client.IgnoreNotFound(err) != nil {
 			t.Logf("Failed to delete Credential Secret: %v", err)
 		}
 	})
@@ -191,6 +194,20 @@ func createMCMSecret(ctx context.Context, t *testing.T, testEnv *TestEnv) error 
 }
 
 func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
+	// GDC MKS periodically reconciles the 'deny-crud-system-resources-binding'
+	// ValidatingAdmissionPolicyBinding on the VUC, which blocks ServiceAccounts outside
+	// system namespaces (such as mcm-sa in the test namespace) from creating
+	// bootstrap-token Secrets in kube-system. Remove the binding if present so MCM can
+	// create bootstrap tokens in kube-system when running directly on the VUC.
+	vapBinding := &admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "deny-crud-system-resources-binding",
+		},
+	}
+	if err := testEnv.VucClient.Delete(ctx, vapBinding); client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("failed to delete ValidatingAdmissionPolicyBinding %q: %w", vapBinding.Name, err)
+	}
+
 	// 1. Create Service Account
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
@@ -370,46 +387,7 @@ func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 	return nil
 }
 
-func createImagePullSecret(ctx context.Context, t *testing.T, testEnv *TestEnv) (string, error) {
-	t.Helper()
-
-	if cfg.ImagePullCredential == "" {
-		return "", fmt.Errorf("image_pull_credential flag is required")
-	}
-
-	credBytes, err := os.ReadFile(cfg.ImagePullCredential)
-	if err != nil {
-		return "", fmt.Errorf("failed to read image pull credential: %w", err)
-	}
-
-	secretName := fmt.Sprintf("harbor-registry-%s", cfg.CommitHash)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: testEnv.Namespace,
-		},
-		Type: corev1.SecretTypeDockerConfigJson,
-		Data: map[string][]byte{
-			corev1.DockerConfigJsonKey: credBytes,
-		},
-	}
-
-	t.Cleanup(func() {
-		err := testEnv.VucClient.Delete(context.Background(), secret)
-		if err != nil && !errors.IsNotFound(err) {
-			t.Logf("Failed to delete Image Pull Secret: %v", err)
-		}
-	})
-
-	t.Logf("Creating Image Pull Secret: %s", secretName)
-	if err := testEnv.VucClient.Create(ctx, secret); err != nil {
-		return "", fmt.Errorf("failed to create image pull secret: %w", err)
-	}
-
-	return secretName, nil
-}
-
-func deployMCM(ctx context.Context, t *testing.T, testEnv *TestEnv, imagePullSecretName string) error {
+func deployMCM(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 	t.Logf("start deploying MCM deployment : %s ", mcmAppName)
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -427,9 +405,6 @@ func deployMCM(ctx context.Context, t *testing.T, testEnv *TestEnv, imagePullSec
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: testEnv.SAName,
-					ImagePullSecrets: []corev1.LocalObjectReference{
-						{Name: imagePullSecretName},
-					},
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: ptr.To(true),
 					},
@@ -509,6 +484,12 @@ func deployMCM(ctx context.Context, t *testing.T, testEnv *TestEnv, imagePullSec
 	t.Log("Waiting for MCM Deployment to be Ready...")
 	err := kubernetes.WaitForDeploymentReady(ctx, testEnv.VucClient, testEnv.Namespace, mcmAppName, provisioningTimeout)
 	if err != nil {
+		diagPods := &corev1.PodList{}
+		if listErr := testEnv.VucClient.List(ctx, diagPods, client.InNamespace(testEnv.Namespace)); listErr == nil {
+			for _, p := range diagPods.Items {
+				t.Logf("Pod %s phase=%s status=%+v", p.Name, p.Status.Phase, p.Status.ContainerStatuses)
+			}
+		}
 		return fmt.Errorf("failed to wait for MCM Deployment to be Ready: %w", err)
 	}
 	pods := &corev1.PodList{}

@@ -4,11 +4,11 @@
 
 export GOFLAGS ?= -mod=mod
 
-REGISTRY                          := europe-docker.pkg.dev/gardener-project/public
+REGISTRY                          ?= europe-docker.pkg.dev/gardener-project/public
 EXECUTABLE                        := machine-controller-manager-provider-gdch
 REPO_ROOT                         := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 PROJECT                           := github.com/gardener/machine-controller-manager-provider-gdc
-IMAGE_REPOSITORY                  := $(REGISTRY)/machine-controller-manager-provider-gdch
+IMAGE_REPOSITORY                  ?= $(REGISTRY)/machine-controller-manager-provider-gdch
 VERSION                           ?= v0.1.0-dev
 IMAGE_TAG                         ?= $(VERSION)
 
@@ -53,13 +53,13 @@ clean:
 .PHONY: check
 check: format $(GOLANGCI_LINT)
 	@echo "Running golangci-lint..."
-	@$(GOLANGCI_LINT) run --config=./.golangci.yaml ./cmd/... ./pkg/... ./gdc/...
+	@$(GOLANGCI_LINT) run --config=./.golangci.yaml ./cmd/... ./pkg/... ./gdc/... ./integration/...
 	@echo "Running go vet..."
-	@go vet ./cmd/... ./pkg/... ./gdc/...
+	@go vet ./cmd/... ./pkg/... ./gdc/... ./integration/...
 
 .PHONY: format
 format: $(GOIMPORTS)
-	@$(GOIMPORTS) -l -w -local github.com/gardener/machine-controller-manager-provider-gdc ./cmd ./pkg ./gdc
+	@$(GOIMPORTS) -l -w -local github.com/gardener/machine-controller-manager-provider-gdc ./cmd ./pkg ./gdc ./integration
 
 .PHONY: build-local
 build-local:
@@ -91,6 +91,10 @@ test: unittests
 unittests: $(GINKGO)
 	@go test -race -timeout=3m ./pkg/... ./gdc/... ./cmd/...
 
+.PHONY: test-integration
+test-integration:
+	./scripts/ci-integration-test.sh
+
 .PHONY: docker-images
 docker-images:
 	@docker build -t $(IMAGE_REPOSITORY):$(IMAGE_TAG) -f Dockerfile --target machine-controller-manager-provider-gdch .
@@ -100,12 +104,13 @@ help: ## Display available targets
 	@echo "Machine Controller Manager Provider GDC Build System"
 	@echo "==================================================="
 	@echo "Available make targets:"
-	@echo "  make format        - Formats all Go source files with goimports"
-	@echo "  make check         - Runs code linters (golangci-lint, go vet)"
-	@echo "  make test          - Runs unit test suite across all packages"
-	@echo "  make unittests     - Alias for test"
-	@echo "  make build-local   - Builds binaries locally in current environment"
-	@echo "  make release       - Builds cross-compiled release binaries"
-	@echo "  make docker-images - Builds multi-stage Docker images for machine controller"
-	@echo "  make tidy          - Runs go mod tidy"
-	@echo "  make clean         - Cleans built binaries and tools cache"
+	@echo "  make format           - Formats all Go source files with goimports"
+	@echo "  make check            - Runs code linters (golangci-lint, go vet)"
+	@echo "  make test             - Runs unit test suite across all packages"
+	@echo "  make unittests        - Alias for test"
+	@echo "  make test-integration - Runs presubmit integration tests against GDC"
+	@echo "  make build-local      - Builds binaries locally in current environment"
+	@echo "  make release          - Builds cross-compiled release binaries"
+	@echo "  make docker-images    - Builds multi-stage Docker images for machine controller"
+	@echo "  make tidy             - Runs go mod tidy"
+	@echo "  make clean            - Cleans built binaries and tools cache"
