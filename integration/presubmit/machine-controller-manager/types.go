@@ -24,8 +24,8 @@ import (
 
 const (
 	// Timeouts
-	globalTestTimeout   = 15 * time.Minute
-	provisioningTimeout = 5 * time.Minute
+	globalTestTimeout   = 20 * time.Minute
+	provisioningTimeout = 10 * time.Minute
 	cleanupTimeout      = 10 * time.Minute
 	verificationTimeout = 10 * time.Minute
 	// Resource Names

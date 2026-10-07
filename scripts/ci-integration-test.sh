@@ -5,11 +5,12 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${GITHUB_WORKSPACE:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 cd "${REPO_ROOT}"
 
 # shellcheck source=scripts/ci-common.sh
-source "${REPO_ROOT}/scripts/ci-common.sh"
+source "${SCRIPT_DIR}/ci-common.sh"
 
 check_ci_preconditions
 

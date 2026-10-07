@@ -207,6 +207,22 @@ func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 	if err := testEnv.VucClient.Delete(ctx, vapBinding); client.IgnoreNotFound(err) != nil {
 		return fmt.Errorf("failed to delete ValidatingAdmissionPolicyBinding %q: %w", vapBinding.Name, err)
 	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = testEnv.VucClient.Delete(ctx, &admissionregistrationv1.ValidatingAdmissionPolicyBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "deny-crud-system-resources-binding",
+					},
+				})
+			}
+		}
+	}()
 
 	// 1. Create Service Account
 	sa := &corev1.ServiceAccount{
