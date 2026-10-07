@@ -96,17 +96,19 @@ func createMachineDeployment(ctx context.Context, t *testing.T, env *TestEnv, cl
 		defer cancel()
 		ns := client.InNamespace(env.Namespace)
 		labelSelector := client.MatchingLabels{"test-run-id": cfg.CommitHash}
-		// Capture VM Names BEFORE deleting Machines
-		// Will use these names to verify infrastructure deletion later.
+		// Capture VM Names BEFORE deleting Machines using a bounded timeout so a stalled
+		// management API connection cannot starve MachineDeployment deletion.
 		vmNames := []string{}
 		vmList := &vmv1.VirtualMachineList{}
-		if err := env.MgmtClient.List(ctx, vmList, client.InNamespace(env.Project), labelSelector); err == nil {
+		listCtx, listCancel := context.WithTimeout(ctx, 30*time.Second)
+		if err := env.MgmtClient.List(listCtx, vmList, client.InNamespace(env.Project), labelSelector); err == nil {
 			for _, vm := range vmList.Items {
 				vmNames = append(vmNames, vm.Name)
 			}
 		} else {
 			t.Logf("Warning: Could not list VMs to track deletion: %v", err)
 		}
+		listCancel()
 		if err := env.VucClient.DeleteAllOf(ctx, &machinev1alpha1.MachineDeployment{}, ns, labelSelector); err != nil {
 			t.Logf("Error deleting MachineDeployments: %v", err)
 		}

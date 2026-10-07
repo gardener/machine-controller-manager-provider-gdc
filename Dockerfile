@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 ############# base
 FROM gcr.io/distroless/static-debian13:nonroot AS base
 WORKDIR /
-USER nonroot:nonroot
+USER 65532:65532
 
 #############      machine-controller-manager-provider-gdch     #############
 FROM base AS machine-controller-manager-provider-gdch

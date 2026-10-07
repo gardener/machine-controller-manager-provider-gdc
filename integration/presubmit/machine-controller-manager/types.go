@@ -17,8 +17,9 @@ import (
 	"flag"
 	"time"
 
-	gdcclient "github.com/gardener/machine-controller-manager-provider-gdc/gdc/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	gdcclient "github.com/gardener/machine-controller-manager-provider-gdc/gdc/pkg/client"
 )
 
 const (
@@ -38,22 +39,22 @@ const (
     `
 )
 
+// Config holds the CLI flag configuration for the presubmit integration test.
 type Config struct {
-	CommitHash          string
-	Zone                string
-	Region              string
-	Project             string
-	VUC                 string
-	Org                 string
-	LabURL              string
-	CAFile              string
-	SAFile              string
-	ImagePullCredential string
-	GdcMCMImageTag      string
-	MCMImageTag         string
-	RegistryURL         string
-	MachineType         string
-	MachineImage        string
+	CommitHash     string
+	Zone           string
+	Region         string
+	Project        string
+	VUC            string
+	Org            string
+	LabURL         string
+	CAFile         string
+	SAFile         string
+	GdcMCMImageTag string
+	MCMImageTag    string
+	RegistryURL    string
+	MachineType    string
+	MachineImage   string
 }
 
 // GDCProviderSpec defines the structure for the MachineClass ProviderSpec.
@@ -71,6 +72,8 @@ type GDCProviderSpec struct {
 	Labels               map[string]string `json:"labels"`
 	Annotations          map[string]string `json:"annotations"`
 }
+
+// GDCProviderDisk defines the disk configuration in GDCProviderSpec.
 type GDCProviderDisk struct {
 	Boot       bool              `json:"boot"`
 	AutoDelete bool              `json:"autoDelete"`
@@ -103,7 +106,6 @@ func init() {
 	flag.StringVar(&cfg.LabURL, "lab_url", "", "Lab URL (e.g., staging.gpcdemolabs.com)")
 	flag.StringVar(&cfg.CAFile, "cafile", "", "Path to CA file")
 	flag.StringVar(&cfg.SAFile, "service_account", "", "Path to Service Account file")
-	flag.StringVar(&cfg.ImagePullCredential, "image_pull_credential", "", "Path to config.json for images")
 	flag.StringVar(&cfg.GdcMCMImageTag, "gdc_mcm_image_tag", "", "MCM image tag (image:tag)")
 	flag.StringVar(&cfg.MCMImageTag, "mcm_image_tag", "", "MCM image tag (image:tag)")
 	flag.StringVar(&cfg.RegistryURL, "registry_url", "", "Harbor Registry URL")
