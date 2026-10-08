@@ -56,7 +56,7 @@ prepare_trusted_ci_files() {
   mkdir -p "${CI_TRUSTED_DIR}/scripts" "${CI_TRUSTED_DIR}/bin"
 
   if git rev-parse --verify origin/main >/dev/null 2>&1 && \
-     git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'verify_and_prepare_ci' && \
+     git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'verify_pr_head_at_comment_time' && \
      git cat-file -e origin/main:integration/cmd/token-helper/main.go 2>/dev/null; then
     echo "Staging trusted CI scripts and token-helper from origin/main..."
     git show origin/main:scripts/ci-common.sh > "${CI_TRUSTED_DIR}/scripts/ci-common.sh"
@@ -79,6 +79,60 @@ prepare_trusted_ci_files() {
 
   chmod +x "${CI_TRUSTED_DIR}/scripts/ci-common.sh" "${CI_TRUSTED_DIR}/scripts/ci-integration-test.sh"
   export CI_TRUSTED_DIR
+}
+
+# verify_pr_head_at_comment_time ensures that when triggered via '/test-integration'
+# (issue_comment), the fetched PR head commit already existed on the PR before the
+# comment was posted, preventing a TOCTOU race if a commit is pushed right after
+# the reviewer comments.
+verify_pr_head_at_comment_time() {
+  if [[ "${GITHUB_EVENT_NAME:-}" != "issue_comment" || ! -f "${GITHUB_EVENT_PATH:-}" ]]; then
+    return 0
+  fi
+
+  local comment_created_at comment_epoch
+  comment_created_at=$(jq -r '.comment.created_at // empty' "${GITHUB_EVENT_PATH}")
+  if [[ -z "${comment_created_at}" ]]; then
+    echo "::error::Missing .comment.created_at in issue_comment event payload."
+    exit 1
+  fi
+  comment_epoch=$(date -d "${comment_created_at}" +%s)
+
+  local commit_date commit_epoch
+  commit_date=$(git show -s --format=%cI "${PR_HEAD_SHA}")
+  commit_epoch=$(date -d "${commit_date}" +%s)
+  if [[ "${commit_epoch}" -gt "${comment_epoch}" ]]; then
+    echo "::error::PR #${PR_NUMBER} head commit ${PR_HEAD_SHA:0:7} was committed at ${commit_date}, which is after the '/test-integration' comment was posted at ${comment_created_at}. Aborting to prevent executing unreviewed code."
+    exit 1
+  fi
+
+  if [[ -n "${GH_TOKEN:-}" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+    local latest_timeline_event_at
+    latest_timeline_event_at=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/timeline?per_page=100" 2>/dev/null | \
+      jq -rs '[ .[][] | select(.event == "committed" or .event == "head_ref_force_pushed") | (.created_at // .committer.date // empty) | select(length > 0) ] | sort | last // empty' || true)
+    if [[ -n "${latest_timeline_event_at}" ]]; then
+      local timeline_epoch
+      timeline_epoch=$(date -d "${latest_timeline_event_at}" +%s)
+      if [[ "${timeline_epoch}" -gt "${comment_epoch}" ]]; then
+        echo "::error::PR #${PR_NUMBER} had a commit or force-push at ${latest_timeline_event_at}, which is after the '/test-integration' comment was posted at ${comment_created_at}. Aborting to prevent executing unreviewed code."
+        exit 1
+      fi
+    fi
+
+    local earliest_suite_at
+    earliest_suite_at=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PR_HEAD_SHA}/check-suites" \
+      --jq '[ .check_suites[]?.created_at // empty | select(length > 0) ] | sort | first // empty' 2>/dev/null || true)
+    if [[ -n "${earliest_suite_at}" ]]; then
+      local suite_epoch
+      suite_epoch=$(date -d "${earliest_suite_at}" +%s)
+      if [[ "${suite_epoch}" -gt "${comment_epoch}" ]]; then
+        echo "::error::PR #${PR_NUMBER} head commit ${PR_HEAD_SHA:0:7} was pushed to GitHub at ${earliest_suite_at}, which is after the '/test-integration' comment was posted at ${comment_created_at}. Aborting to prevent executing unreviewed code."
+        exit 1
+      fi
+    fi
+  fi
+
+  echo "Verified PR #${PR_NUMBER} head commit ${PR_HEAD_SHA:0:7} predates '/test-integration' comment (${comment_created_at})."
 }
 
 # check_ci_preconditions verifies whether the integration test should run when
@@ -186,6 +240,7 @@ check_ci_preconditions() {
     export PR_HEAD_SHA
     COMMIT_HASH="${PR_HEAD_SHA:0:7}"
     export COMMIT_HASH
+    verify_pr_head_at_comment_time
     start_pr_check_run "${CHECK_NAME:-MCM Integration Test (GDC Staging)}"
     git checkout "pr-${PR_NUMBER}"
     echo "Merging base branch (${base_branch_sha:0:7}) into PR #${PR_NUMBER} (${COMMIT_HASH})..."
