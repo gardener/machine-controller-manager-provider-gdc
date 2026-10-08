@@ -9,7 +9,7 @@ EXECUTABLE                        := machine-controller-manager-provider-gdch
 REPO_ROOT                         := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 PROJECT                           := github.com/gardener/machine-controller-manager-provider-gdc
 IMAGE_REPOSITORY                  ?= $(REGISTRY)/machine-controller-manager-provider-gdch
-VERSION                           ?= v0.1.0-dev
+VERSION                           ?= $(shell cat $(REPO_ROOT)/VERSION)
 IMAGE_TAG                         ?= $(VERSION)
 
 #########################################
