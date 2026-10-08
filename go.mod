@@ -41,7 +41,7 @@ require (
 
 require (
 	github.com/gardener/gardener v1.149.3
-	github.com/gardener/machine-controller-manager v0.62.1
+	github.com/gardener/machine-controller-manager v0.63.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/googlecloudplatform/google-distributed-cloud-apis v0.0.0-20260824201624-0c18fa0ddc04
 	k8s.io/utils v0.0.0-20260707023825-cf1189d6abe3
