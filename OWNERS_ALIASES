@@ -6,8 +6,10 @@ aliases:
   - dilipkumar2k6
   - HophinKibona
   - fuzzdota
+  - gardener-ci-robot
   machine-controller-manager-provider-gdc-approvers:
   - AndreasBurger
   - dilipkumar2k6
   - HophinKibona
   - fuzzdota
+  - gardener-ci-robot
