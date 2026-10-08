@@ -67,7 +67,7 @@ jobs:
         run: |
           git fetch origin main
           mkdir -p /tmp/ci-bootstrap
-          if git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'verify_and_prepare_ci'; then
+          if git show origin/main:scripts/ci-common.sh 2>/dev/null | grep -q 'verify_pr_head_at_comment_time'; then
             git show origin/main:scripts/ci-common.sh > /tmp/ci-bootstrap/ci-common.sh
           else
             cp ./scripts/ci-common.sh /tmp/ci-bootstrap/ci-common.sh
