@@ -10,18 +10,13 @@ is_authorized_maintainer() {
   local actor="$1"
   local assoc="${2:-}"
 
-  if [[ -z "${actor}" || "${actor}" == *"[bot]" || "${actor}" == *"-robot" ]]; then
+  if [[ -z "${actor}" ]]; then
     return 1
   fi
 
-  case "${assoc}" in
-    COLLABORATOR|MEMBER|OWNER)
-      return 0
-      ;;
-  esac
-
-  local actor_lc owners_list="" owners_ref="HEAD"
+  local actor_lc actor_base_lc owners_list="" owners_ref="HEAD"
   actor_lc=$(printf '%s' "${actor}" | tr '[:upper:]' '[:lower:]')
+  actor_base_lc="${actor_lc%\[bot\]}"
   if git rev-parse --verify origin/main >/dev/null 2>&1; then
     owners_ref="origin/main"
   fi
@@ -38,9 +33,20 @@ is_authorized_maintainer() {
     owners_list+=$(printf '%s\n' "${codeowners_content}" | grep -v '^#' | grep -oE '@[A-Za-z0-9_-]+' | tr -d '@' || true)
   fi
 
-  if printf '%s\n' "${owners_list}" | tr '[:upper:]' '[:lower:]' | grep -Fxq "${actor_lc}"; then
+  if printf '%s\n' "${owners_list}" | tr '[:upper:]' '[:lower:]' | grep -Fxq "${actor_lc}" || \
+     printf '%s\n' "${owners_list}" | tr '[:upper:]' '[:lower:]' | grep -Fxq "${actor_base_lc}"; then
     return 0
   fi
+
+  if [[ "${actor}" == *"[bot]" || "${actor}" == *"-robot" ]]; then
+    return 1
+  fi
+
+  case "${assoc}" in
+    COLLABORATOR|MEMBER|OWNER)
+      return 0
+      ;;
+  esac
 
   return 1
 }
@@ -156,7 +162,7 @@ check_ci_preconditions() {
   fi
 
   # For pull_request events, only run automatically on same-repository PRs
-  # authored by a non-bot repository collaborator or Gardener organization member.
+  # authored by an authorized maintainer or trusted bot listed in OWNERS_ALIASES.
   # Exiting with code 1 when skipped ensures the required status check blocks
   # merging until a maintainer manually triggers '/test-integration' or workflow_dispatch.
   if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
@@ -165,12 +171,6 @@ check_ci_preconditions() {
     author_association=$(jq -r '.pull_request.author_association // empty' "${GITHUB_EVENT_PATH}")
     pr_user=$(jq -r '.pull_request.user.login // empty' "${GITHUB_EVENT_PATH}")
     pr_number=$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}")
-
-    if [[ "${GITHUB_ACTOR:-}" == *"[bot]" || "${GITHUB_ACTOR:-}" == *"-robot" || "${pr_user}" == *"[bot]" || "${pr_user}" == *"-robot" ]]; then
-      echo "Skipping automatic integration test for automated bot account (${pr_user:-${GITHUB_ACTOR}})."
-      echo "A maintainer must trigger this test manually by commenting '/test-integration' on the PR or via workflow_dispatch with pr_number=${pr_number}."
-      exit 1
-    fi
 
     if [[ "${head_repo}" != "${GITHUB_REPOSITORY:-}" ]]; then
       echo "Skipping automatic integration test for forked PR (${head_repo})."
