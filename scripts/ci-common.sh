@@ -141,6 +141,108 @@ verify_pr_head_at_comment_time() {
   echo "Verified PR #${PR_NUMBER} head commit ${PR_HEAD_SHA:0:7} predates '/test-integration' comment (${comment_created_at})."
 }
 
+# should_skip_non_code_changes returns 0 (true) on pull_request events when:
+# 1. All files modified in the PR relative to origin/main are non-code files
+#    (e.g. README.md, docs, OWNERS, Makefile, VERSION, etc.), OR
+# 2. The PR branch already has a previous commit where the 'Run MCM Integration Test'
+#    step succeeded, and only non-runtime files changed between that tested commit
+#    and the current PR head (ignoring upstream origin/main changes brought in by
+#    a rebase or merge).
+should_skip_non_code_changes() {
+  if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
+    return 1
+  fi
+
+  local non_code_regex='^(\.gitignore|\.dockerignore|\.golangci\.yaml|OWNERS.*|CODEOWNERS|LICENSE.*|NOTICE.*|VERSION|Makefile|.*\.md|docs/.*|\.github/.*|scripts/ci-common\.sh)$'
+  local pr_head_sha=""
+  if [[ -f "${GITHUB_EVENT_PATH:-}" ]]; then
+    pr_head_sha=$(jq -r '.pull_request.head.sha // empty' "${GITHUB_EVENT_PATH}")
+  fi
+  if [[ -z "${pr_head_sha}" ]]; then
+    pr_head_sha=$(git rev-parse HEAD)
+  fi
+
+  # 1. Check if the entire PR diff against origin/main only touches non-code files
+  #    (excluding runtime code, Dockerfile, and ci-integration-test.sh).
+  local pr_files
+  pr_files=$(git diff --name-only "origin/main...${pr_head_sha}" 2>/dev/null || true)
+  if [[ -n "${pr_files}" ]]; then
+    if ! printf '%s\n' "${pr_files}" | grep -qvE "${non_code_regex}"; then
+      echo "All files changed in PR (${pr_files//$'\n'/, }) are non-code files. Skipping integration test."
+      return 0
+    fi
+  fi
+
+  # 2. Check if an earlier commit on this PR branch already passed the
+  #    integration test step and only non-code files changed since that commit.
+  local head_ref="${GITHUB_HEAD_REF:-}"
+  if [[ -z "${head_ref}" && -f "${GITHUB_EVENT_PATH:-}" ]]; then
+    head_ref=$(jq -r '.pull_request.head.ref // empty' "${GITHUB_EVENT_PATH}")
+  fi
+  if [[ -z "${head_ref}" || -z "${GH_TOKEN:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
+    return 1
+  fi
+
+  local candidate_runs
+  candidate_runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/integration-test.yaml/runs?branch=${head_ref}&status=completed&per_page=10" \
+    --jq '.workflow_runs[] | select(.conclusion == "success") | "\(.id) \(.head_sha)"' 2>/dev/null || true)
+  if [[ -z "${candidate_runs}" ]]; then
+    return 1
+  fi
+
+  local run_id prev_sha tested_sha=""
+  while read -r run_id prev_sha; do
+    [[ -z "${run_id}" || -z "${prev_sha}" || "${prev_sha}" == "${pr_head_sha}" ]] && continue
+    local step_ok
+    step_ok=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" \
+      --jq '.jobs[] | select(.name == "MCM Integration Test (GDC Staging)" or .name == "Extension Provider Integration Test (GDC Staging)") | .steps[] | select((.name == "Run MCM Integration Test" or .name == "Run Extension Provider Integration Test") and .conclusion == "success") | .conclusion' 2>/dev/null | head -n 1 || true)
+    if [[ "${step_ok}" == "success" ]]; then
+      tested_sha="${prev_sha}"
+      break
+    fi
+  done <<< "${candidate_runs}"
+
+  if [[ -z "${tested_sha}" ]]; then
+    return 1
+  fi
+
+  if ! git cat-file -e "${tested_sha}^{commit}" 2>/dev/null; then
+    git fetch --depth=50 origin "${tested_sha}" >/dev/null 2>&1 || return 1
+  fi
+
+  local prev_base curr_base changed_files
+  prev_base=$(git merge-base origin/main "${tested_sha}" 2>/dev/null || echo "origin/main")
+  curr_base=$(git merge-base origin/main "${pr_head_sha}" 2>/dev/null || echo "origin/main")
+  changed_files=$(git diff --name-only "${tested_sha}" "${pr_head_sha}" 2>/dev/null || return 1)
+
+  local file effective_changes=()
+  while IFS= read -r file; do
+    [[ -z "${file}" ]] && continue
+    # Ignore files whose PR-specific diff against main is unchanged (i.e. files
+    # that only changed because the PR was rebased onto a newer origin/main).
+    if [[ "$(git diff "${prev_base}" "${tested_sha}" -- "${file}" 2>/dev/null | git patch-id --stable | awk '{print $1}')" == \
+          "$(git diff "${curr_base}" "${pr_head_sha}" -- "${file}" 2>/dev/null | git patch-id --stable | awk '{print $1}')" ]]; then
+      continue
+    fi
+    effective_changes+=("${file}")
+  done <<< "${changed_files}"
+
+  if [[ "${#effective_changes[@]}" -eq 0 ]]; then
+    echo "Integration test already passed on ${tested_sha:0:7} and no PR files changed since then (rebase only). Skipping integration test rerun."
+    return 0
+  fi
+
+  for file in "${effective_changes[@]}"; do
+    if ! [[ "${file}" =~ ${non_code_regex} ]]; then
+      echo "Code file '${file}' changed since last passing commit ${tested_sha:0:7}; integration test will run."
+      return 1
+    fi
+  done
+
+  echo "Integration test already passed on ${tested_sha:0:7} and only non-code files changed since then (${effective_changes[*]}). Skipping integration test rerun."
+  return 0
+}
+
 # check_ci_preconditions verifies whether the integration test should run when
 # triggered by GitHub Actions, and checks out the target PR on manual dispatch
 # or '/test-integration' PR comment.
@@ -182,6 +284,13 @@ check_ci_preconditions() {
       echo "Skipping automatic integration test for untrusted author '${pr_user}' (author_association='${author_association}')."
       echo "A maintainer must trigger this test manually by commenting '/test-integration' on the PR or via workflow_dispatch with pr_number=${pr_number}."
       exit 1
+    fi
+
+    if should_skip_non_code_changes; then
+      if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        echo "should_run=false" >> "${GITHUB_OUTPUT}"
+      fi
+      exit 0
     fi
   fi
 
