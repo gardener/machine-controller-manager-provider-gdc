@@ -2078,3 +2078,64 @@ func TestProvider_CreateMachine_VMRunningTimeoutSeconds_Errors(t *testing.T) {
 		})
 	}
 }
+
+func TestProvider_CreateMachine_AbortedWhenVMDeletedDuringWait(t *testing.T) {
+	s := scheme()
+	c := k8sfake.NewClientBuilder().
+		WithScheme(s).
+		Build()
+
+	spi := &mock.FakeSPI{
+		KubeClient: c,
+	}
+	p := &Provider{SPI: spi}
+
+	req := &driver.CreateMachineRequest{
+		Machine: &v1alpha1.Machine{ObjectMeta: metav1.ObjectMeta{Name: "fake-machine-aborted"}},
+		MachineClass: &v1alpha1.MachineClass{
+			ProviderSpec: runtime.RawExtension{
+				Raw: func() []byte {
+					spec := api.ProviderSpec{
+						Project:                 "fake-shoot-project",
+						MachineType:             "fake-vm-type",
+						SubnetName:              "test-subnet",
+						VMRunningTimeoutSeconds: ptr.To(30),
+						Disks:                   []*api.Disk{},
+					}
+					raw, _ := json.Marshal(spec)
+					return raw
+				}(),
+			},
+		},
+		Secret: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "mcm-secret"}, Data: map[string][]byte{"userData": []byte(`fake-bootstrap-content`)}},
+	}
+
+	go func() {
+		_ = wait.PollUntilContextTimeout(context.Background(), 10*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+			vm := &vmv1.VirtualMachine{}
+			if err := c.Get(ctx, client.ObjectKey{Namespace: "fake-shoot-project", Name: "fake-machine-aborted"}, vm); err == nil {
+				// Delete the VM after the initial poll tick has observed it.
+				time.Sleep(100 * time.Millisecond)
+				if err := c.Delete(ctx, vm); err == nil {
+					return true, nil
+				}
+			}
+			return false, nil
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := p.CreateMachine(ctx, req)
+	if err == nil {
+		t.Fatalf("Expected Aborted error when VM is deleted during wait, got nil")
+	}
+	machineErr, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("Expected status error, got: %v", err)
+	}
+	if machineErr.Code() != codes.Aborted {
+		t.Errorf("Expected error code Aborted, got %s (%v)", machineErr.Code(), err)
+	}
+}

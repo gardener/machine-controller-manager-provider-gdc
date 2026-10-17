@@ -17,6 +17,7 @@ check_ci_preconditions
 COMMIT_HASH="${COMMIT_HASH:-$(git rev-parse --short HEAD)}"
 REGION="${GDC_REGION:-us-west6}"
 ZONE="${GDC_ZONE:-us-west6-a}"
+AVAILABLE_ZONES="${GDC_AVAILABLE_ZONES:-us-west6-a,us-west6-b,us-west6-c}"
 GDCH_PROJECT="${GDC_PROJECT:-sapbtp}"
 VUC="${GDC_VUC:-gardener-github-ci}"
 ORG="${GDC_ORG:-gdc1}"
@@ -59,6 +60,7 @@ go test -v -timeout=20m ./integration/presubmit/machine-controller-manager \
   -args \
   --commit_hash="${COMMIT_HASH}" \
   --zone="${ZONE}" \
+  --available_zones="${AVAILABLE_ZONES}" \
   --region="${REGION}" \
   --project="${GDCH_PROJECT}" \
   --vuc="${VUC}" \

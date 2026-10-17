@@ -24,10 +24,18 @@ import (
 
 const (
 	// Timeouts
-	globalTestTimeout   = 25 * time.Minute
-	provisioningTimeout = 10 * time.Minute
-	cleanupTimeout      = 10 * time.Minute
-	verificationTimeout = 15 * time.Minute
+	globalTestTimeout            = 25 * time.Minute
+	provisioningTimeout          = 10 * time.Minute
+	cleanupTimeout               = 10 * time.Minute
+	gracefulMachineDeleteTimeout = 2 * time.Minute
+	verificationTimeout          = 15 * time.Minute
+	// vmStartupZoneFailoverTimeout bounds how long verifyProvisioning waits for a
+	// newly created VirtualMachine to leave the "Starting" state in a given zone
+	// before failing over to the next candidate zone in --available_zones.
+	// A healthy GDC VM transitions from Starting to Running in ~30-60s; if a
+	// baremetal host in the zone has a wedged KubeVirt/CSI runtime, the VMI stays
+	// in Scheduling (VM state "Starting") indefinitely.
+	vmStartupZoneFailoverTimeout = 2 * time.Minute
 	// Resource Names
 	mcmSecretName = "mcm-presubmit-secret"
 	mcmAppName    = "machine-controller-manager"
@@ -43,6 +51,7 @@ const (
 type Config struct {
 	CommitHash     string
 	Zone           string
+	AvailableZones string
 	Region         string
 	Project        string
 	VUC            string
@@ -59,18 +68,19 @@ type Config struct {
 
 // GDCProviderSpec defines the structure for the MachineClass ProviderSpec.
 type GDCProviderSpec struct {
-	Name                 string            `json:"name"`
-	Project              string            `json:"project"`
-	MachineType          string            `json:"machineType"`
-	AccessEnabled        bool              `json:"accessEnabled"`
-	CAData               string            `json:"caData"`
-	RegistryURL          string            `json:"registryURL"`
-	OrgClusterURL        string            `json:"orgClusterURL"`
-	SubnetName           string            `json:"subnetName"`
-	Disks                []GDCProviderDisk `json:"disks"`
-	CredentialsSecretRef map[string]string `json:"credentialsSecretRef"`
-	Labels               map[string]string `json:"labels"`
-	Annotations          map[string]string `json:"annotations"`
+	Name                    string            `json:"name"`
+	Project                 string            `json:"project"`
+	MachineType             string            `json:"machineType"`
+	AccessEnabled           bool              `json:"accessEnabled"`
+	CAData                  string            `json:"caData"`
+	RegistryURL             string            `json:"registryURL"`
+	OrgClusterURL           string            `json:"orgClusterURL"`
+	SubnetName              string            `json:"subnetName"`
+	Disks                   []GDCProviderDisk `json:"disks"`
+	CredentialsSecretRef    map[string]string `json:"credentialsSecretRef"`
+	Labels                  map[string]string `json:"labels"`
+	Annotations             map[string]string `json:"annotations"`
+	VMRunningTimeoutSeconds *int              `json:"vmRunningTimeoutSeconds,omitempty"`
 }
 
 // GDCProviderDisk defines the disk configuration in GDCProviderSpec.
@@ -86,12 +96,15 @@ type GDCProviderDisk struct {
 
 // TestEnv holds the runtime test environment (clients, config, etc.)
 type TestEnv struct {
-	VucClient  client.WithWatch
-	MgmtClient client.WithWatch
-	GDCConfig  *gdcclient.OrgClusterConfig
-	Namespace  string
-	Project    string
-	SAName     string
+	VucClient       client.WithWatch
+	MgmtClient      client.WithWatch
+	ZoneMgmtClients map[string]client.WithWatch
+	AvailableZones  []string
+	ActiveZone      string
+	GDCConfig       *gdcclient.OrgClusterConfig
+	Namespace       string
+	Project         string
+	SAName          string
 }
 
 var cfg Config
@@ -99,6 +112,7 @@ var cfg Config
 func init() {
 	flag.StringVar(&cfg.CommitHash, "commit_hash", "dummy", "Short commit hash for git repo")
 	flag.StringVar(&cfg.Zone, "zone", "", "Zone where VUC is deployed")
+	flag.StringVar(&cfg.AvailableZones, "available_zones", "", "Comma-separated list of zones available for VM provisioning")
 	flag.StringVar(&cfg.Region, "region", "", "Region where VUC is deployed")
 	flag.StringVar(&cfg.Project, "project", "", "Project where VUC is created")
 	flag.StringVar(&cfg.VUC, "vuc", "", "VUC name")
