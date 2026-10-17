@@ -7,9 +7,11 @@ aliases:
   - HophinKibona
   - fuzzdota
   - gardener-ci-robot
+  - renovate[bot]
   machine-controller-manager-provider-gdc-approvers:
   - AndreasBurger
   - dilipkumar2k6
   - HophinKibona
   - fuzzdota
   - gardener-ci-robot
+  - renovate[bot]
