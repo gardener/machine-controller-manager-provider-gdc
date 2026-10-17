@@ -164,14 +164,32 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 			lastState   vmv1.VirtualMachineState
 			lastReason  vmv1.VirtualMachineStateReason
 			lastMessage string
+			seenVM      bool
 		)
 		if err := k8swait.PollUntilContextTimeout(ctx, vmStatusPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
 			currentVM := &vmv1.VirtualMachine{}
 			if err := kubeClient.Get(ctx, client.ObjectKey{Name: vm.Name, Namespace: vm.Namespace}, currentVM); err != nil {
 				if apierrors.IsNotFound(err) {
+					// If the VM was already observed and is now gone, it was deleted externally
+					// (e.g. by SafetyController or DeleteMachine during teardown); abort immediately
+					// instead of blocking the MCM worker goroutine until timeout expires.
+					if seenVM {
+						return false, status.Error(codes.Aborted, fmt.Sprintf("VM %s was deleted while waiting to be running", vm.Name))
+					}
 					return false, nil
 				}
+				// When the poll deadline is about to expire, client-go's rate limiter can return
+				// a plain error ("rate: Wait(n=1) would exceed context deadline") that does not
+				// wrap context.DeadlineExceeded. Normalize it to context.DeadlineExceeded so the
+				// caller receives a DeadlineExceeded status with lastState/lastReason/lastMessage.
+				if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || strings.Contains(err.Error(), "would exceed context deadline") {
+					return false, context.DeadlineExceeded
+				}
 				return false, err
+			}
+			seenVM = true
+			if !currentVM.DeletionTimestamp.IsZero() {
+				return false, status.Error(codes.Aborted, fmt.Sprintf("VM %s is terminating while waiting to be running", vm.Name))
 			}
 			lastState = currentVM.Status.State
 			lastReason = currentVM.Status.Reason
@@ -196,7 +214,7 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 			if _, ok := status.FromError(err); ok {
 				return nil, err
 			}
-			if errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "would exceed context deadline") {
 				return nil, status.Error(codes.DeadlineExceeded, fmt.Sprintf("failed to wait for VM %s to be running: still not running after %s (last state: %q, reason: %q, message: %q)", vm.Name, timeout, lastState, lastReason, lastMessage))
 			}
 			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to wait for VM %s to be running: %v", vm.Name, err))

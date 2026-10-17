@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,9 +84,43 @@ func bootstrapTestEnv(_ context.Context, t *testing.T) (*TestEnv, error) {
 	if err := json.Unmarshal(saBytes, &sa); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal SA: %v", err)
 	}
+	caDataEncoded := base64.StdEncoding.EncodeToString(caData)
+
+	var availableZones []string
+	rawZones := cfg.AvailableZones
+	if rawZones == "" && cfg.Region != "" {
+		// Default to all 3 zones in the region (starting with cfg.Zone) when invoked by
+		// an older ci-integration-test.sh that does not pass --available_zones yet.
+		rawZones = fmt.Sprintf("%s,%s-a,%s-b,%s-c", cfg.Zone, cfg.Region, cfg.Region, cfg.Region)
+	}
+	seenZone := make(map[string]bool)
+	for _, z := range strings.Split(rawZones, ",") {
+		if trimmed := strings.TrimSpace(z); trimmed != "" && !seenZone[trimmed] {
+			seenZone[trimmed] = true
+			availableZones = append(availableZones, trimmed)
+		}
+	}
+	if len(availableZones) == 0 {
+		availableZones = []string{cfg.Zone}
+	}
+	activeZone := availableZones[0]
+
+	zoneMgmtClients := make(map[string]client.WithWatch, len(availableZones))
+	for _, z := range availableZones {
+		zCfg := &gdcclient.OrgClusterConfig{
+			OrgClusterURL: fmt.Sprintf("https://management-kube.apiserver.%s.%s.%s", cfg.Org, z, cfg.LabURL),
+			CAData:        caDataEncoded,
+		}
+		zClient, err := gdcclient.Get(zCfg, &sa, scheme)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create mgmt client for zone %s: %v", z, err)
+		}
+		zoneMgmtClients[z] = zClient
+	}
+
 	gdcConfig := &gdcclient.OrgClusterConfig{
-		OrgClusterURL: fmt.Sprintf("https://management-kube.apiserver.%s.%s.%s", cfg.Org, cfg.Zone, cfg.LabURL),
-		CAData:        base64.StdEncoding.EncodeToString(caData),
+		OrgClusterURL: fmt.Sprintf("https://management-kube.apiserver.%s.%s.%s", cfg.Org, activeZone, cfg.LabURL),
+		CAData:        caDataEncoded,
 	}
 	// Initialize GDCloud CLI and cluster client
 	consoleURL := fmt.Sprintf("https://console.%s.%s.%s", cfg.Org, cfg.Zone, cfg.LabURL)
@@ -102,19 +137,38 @@ func bootstrapTestEnv(_ context.Context, t *testing.T) (*TestEnv, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create VUC client: %v", err)
 	}
-	mgmtClient, err := gdcclient.Get(gdcConfig, &sa, scheme)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create mgmt client: %v", err)
-	}
+	mgmtClient := zoneMgmtClients[activeZone]
 	namespace := fmt.Sprintf("mcm-e2e-%s", cfg.CommitHash)
 	return &TestEnv{
-		VucClient:  vucClient,
-		MgmtClient: mgmtClient,
-		GDCConfig:  gdcConfig,
-		Project:    cfg.Project,
-		Namespace:  namespace,
-		SAName:     "mcm-sa",
+		VucClient:       vucClient,
+		MgmtClient:      mgmtClient,
+		ZoneMgmtClients: zoneMgmtClients,
+		AvailableZones:  availableZones,
+		ActiveZone:      activeZone,
+		GDCConfig:       gdcConfig,
+		Project:         cfg.Project,
+		Namespace:       namespace,
+		SAName:          "mcm-sa",
 	}, nil
+}
+
+// MgmtClientForZone returns the management API client for the given zone.
+func (env *TestEnv) MgmtClientForZone(zone string) client.WithWatch {
+	if env.ZoneMgmtClients != nil {
+		if c, ok := env.ZoneMgmtClients[zone]; ok && c != nil {
+			return c
+		}
+	}
+	return env.MgmtClient
+}
+
+// SetActiveZone switches the active provisioning zone and updates GDCConfig and MgmtClient.
+func (env *TestEnv) SetActiveZone(zone string) {
+	env.ActiveZone = zone
+	env.GDCConfig.OrgClusterURL = fmt.Sprintf("https://management-kube.apiserver.%s.%s.%s", cfg.Org, zone, cfg.LabURL)
+	if c := env.MgmtClientForZone(zone); c != nil {
+		env.MgmtClient = c
+	}
 }
 
 // installCRDs deploys MCM CRDs using the Gardener Component library.

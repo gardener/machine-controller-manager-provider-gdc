@@ -28,6 +28,14 @@ import (
 	"github.com/gardener/machine-controller-manager-provider-gdc/gdc/pkg/auth"
 )
 
+const (
+	// defaultClientQPS and defaultClientBurst raise the client-go rate limits
+	// above the 5 QPS / 10 Burst defaults so concurrent VM creation, status
+	// polling, and CRD/API discovery do not fail with rate limiter deadline errors.
+	defaultClientQPS   = 100.0
+	defaultClientBurst = 200
+)
+
 // Get returns a Kubernetes client to the specified cluster of GDC.
 func Get(
 	config *OrgClusterConfig,
@@ -62,6 +70,8 @@ func getRESTConfig(config *OrgClusterConfig, serviceAccount *auth.ServiceAccount
 		TLSClientConfig: rest.TLSClientConfig{
 			CAData: certData,
 		},
+		QPS:   defaultClientQPS,
+		Burst: defaultClientBurst,
 	}
 
 	// Injects STS tokens as the bearer authorization header in the requests.
