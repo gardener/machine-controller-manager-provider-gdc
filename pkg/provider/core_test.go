@@ -1930,7 +1930,14 @@ func TestProvider_CreateMachine_VMRunningTimeoutSeconds_Success(t *testing.T) {
 			vm := &vmv1.VirtualMachine{}
 			err := c.Get(ctx, client.ObjectKey{Namespace: "fake-shoot-project", Name: "fake-machine-3"}, vm)
 			if err == nil {
+				// First simulate transient VirtualMachineProvisioningFailed ErrorConfiguration, then Running
+				vm.Status.State = vmv1.VirtualMachineStateErrorConfiguration
+				vm.Status.Reason = vmv1.VirtualMachineProvisioningFailed
+				vm.Status.Message = "failed to create/update VM: Operation cannot be fulfilled on virtualmachines.kubevirt.io \"fake-machine-3\": the object has been modified; please apply your changes to the latest version and try again"
+				_ = c.Update(ctx, vm)
 				vm.Status.State = vmv1.VirtualMachineStateRunning
+				vm.Status.Reason = ""
+				vm.Status.Message = ""
 				if err := c.Update(ctx, vm); err == nil {
 					return true, nil
 				}

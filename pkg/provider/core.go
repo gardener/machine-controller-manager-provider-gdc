@@ -165,11 +165,17 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 			lastReason  vmv1.VirtualMachineStateReason
 			lastMessage string
 		)
-		if err := k8swait.PollUntilContextTimeout(ctx, vmStatusPollInterval, timeout, true, func(ctx context.Context) (bool, error) {
+		if err := k8swait.PollUntilContextTimeout(ctx, vmStatusPollInterval, timeout, true, func(pollCtx context.Context) (bool, error) {
+			getCtx, cancel := context.WithTimeout(ctx, vmStatusPollInterval)
+			defer cancel()
+
 			currentVM := &vmv1.VirtualMachine{}
-			if err := kubeClient.Get(ctx, client.ObjectKey{Name: vm.Name, Namespace: vm.Namespace}, currentVM); err != nil {
+			if err := kubeClient.Get(getCtx, client.ObjectKey{Name: vm.Name, Namespace: vm.Namespace}, currentVM); err != nil {
 				if apierrors.IsNotFound(err) {
 					return false, nil
+				}
+				if pollCtx.Err() != nil {
+					return false, pollCtx.Err()
 				}
 				return false, err
 			}
@@ -187,6 +193,12 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 				vmv1.VirtualMachineStateDiskError,
 				vmv1.VirtualMachineStateCrashLoopBackoff:
 				if strings.Contains(currentVM.Status.Message, "pending IP from Subnet") {
+					return false, nil
+				}
+				if currentVM.Status.State == vmv1.VirtualMachineStateErrorConfiguration &&
+					(currentVM.Status.Reason == vmv1.MachineDiskNotReady ||
+						currentVM.Status.Reason == vmv1.InterfaceUpdateFailed ||
+						currentVM.Status.Reason == vmv1.VirtualMachineProvisioningFailed) {
 					return false, nil
 				}
 				return false, status.Error(codes.Internal, fmt.Sprintf("VM %s is in error state %q: %s - %s", vm.Name, currentVM.Status.State, currentVM.Status.Reason, currentVM.Status.Message))
