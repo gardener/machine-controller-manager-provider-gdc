@@ -2078,3 +2078,72 @@ func TestProvider_CreateMachine_VMRunningTimeoutSeconds_Errors(t *testing.T) {
 		})
 	}
 }
+
+func TestProvider_CreateMachine_CADataWithoutRegistryURL(t *testing.T) {
+	s := scheme()
+	c := k8sfake.NewClientBuilder().WithScheme(s).Build()
+	p := &Provider{
+		SPI: &mock.FakeSPI{KubeClient: c},
+	}
+
+	req := &driver.CreateMachineRequest{
+		Machine: &v1alpha1.Machine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "fake-machine-cadata-only",
+			},
+		},
+		MachineClass: &v1alpha1.MachineClass{
+			ProviderSpec: runtime.RawExtension{
+				Raw: func() []byte {
+					spec := api.ProviderSpec{
+						Project:                 "fake-shoot-project",
+						MachineType:             "fake-vm-type",
+						VMRunningTimeoutSeconds: ptr.To(0),
+						CAData:                  "ZmFrZS1jYS1kYXRh",
+						Disks: []*api.Disk{{
+							Image:      "fake-image",
+							Project:    "vm-system",
+							Boot:       true,
+							AutoDelete: true,
+							SizeGB:     100,
+						}},
+					}
+					raw, _ := json.Marshal(spec)
+					return raw
+				}(),
+			},
+		},
+		Secret: &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "mcm-secret"},
+			Data:       map[string][]byte{"userData": []byte(`fake-bootstrap-content`)},
+		},
+	}
+
+	if _, err := p.CreateMachine(context.Background(), req); err != nil {
+		t.Fatalf("Provider.CreateMachine() unexpected error = %v", err)
+	}
+
+	gotSecret := &corev1.Secret{}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: "fake-shoot-project",
+		Name:      "fake-machine-cadata-only-cainit-script",
+	}, gotSecret); err != nil {
+		t.Fatalf("failed to get caInit secret: %v", err)
+	}
+
+	script := string(gotSecret.Data["script"])
+	for _, wantSubstr := range []string{
+		`export REGISTRY=""`,
+		`export CADATA="ZmFrZS1jYS1kYXRh"`,
+		`export HARBOR_INTERNAL_REGISTRY="harbor.org.internal"`,
+		`for reg in "${HARBOR_INTERNAL_REGISTRY}" "${REGISTRY}"; do`,
+		`/etc/containerd/certs.d/${reg}/ca.crt`,
+		`/usr/local/share/ca-certificates/gdc-ca.crt`,
+		`/etc/pki/trust/anchors/gdc-ca.crt`,
+		`update-ca-certificates`,
+	} {
+		if !strings.Contains(script, wantSubstr) {
+			t.Errorf("caInit script missing expected substring %q; got:\n%s", wantSubstr, script)
+		}
+	}
+}
