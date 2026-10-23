@@ -47,6 +47,10 @@ const GDCNetworkName = "default"
 const defaultVMWaitTimeout = 10 * time.Minute
 const vmStatusPollInterval = 5 * time.Second
 
+// harborInternalRegistry is the internal DNS hostname for the organization Harbor
+// registry in GDC, whose TLS certificate is always signed by the internal GDC CA.
+const harborInternalRegistry = "harbor.org.internal"
+
 // CreateMachine handles a machine creation request
 // REQUIRED METHOD
 //
@@ -90,8 +94,10 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 	}
 
 	var caInitScriptSecret *corev1.Secret
-	// if vm uses image from RegistryURL, need to specify cert to authorize
-	if spec.RegistryURL != "" && spec.CAData != "" {
+	// Run the CA initialization script whenever CAData is provided, even if
+	// RegistryURL is omitted, so that containerd trusts harbor.org.internal and
+	// the GDC CA bundle is installed into the VM's OS trust store.
+	if spec.CAData != "" {
 		caInitScriptSecret, err = p.createCAInitScriptSecret(ctx, kubeClient, req.Machine, spec)
 		if err != nil {
 			return nil, wrapError(err)
@@ -338,12 +344,35 @@ func (p *Provider) createSecret(ctx context.Context, c client.Client, machine *v
 	return s, nil
 }
 
+// createCAInitScriptSecret creates the startup script secret that configures
+// CA certificates on the Shoot worker VM:
+//  1. Populates /etc/containerd/certs.d/<host>/ca.crt for both harbor.org.internal
+//     and spec.RegistryURL (when non-empty) so containerd trusts the internal and
+//     external Harbor endpoints directly.
+//  2. Installs the CA bundle into the OS trust store (/usr/local/share/ca-certificates
+//     on Garden Linux/Debian and /etc/pki/trust/anchors on SUSE CHost) and runs
+//     update-ca-certificates so OS-level clients and containerd's system trust store
+//     fallback trust GDC internal CAs out of the box.
 func (p *Provider) createCAInitScriptSecret(ctx context.Context, c client.Client, machine *v1alpha1.Machine, spec *api.ProviderSpec) (*corev1.Secret, error) {
 	script := `#!/bin/bash
 export REGISTRY=%q
 export CADATA=%q
-mkdir -p /etc/containerd/certs.d/${REGISTRY}
-echo ${CADATA} | openssl base64 -A -d > /etc/containerd/certs.d/${REGISTRY}/ca.crt`
+export HARBOR_INTERNAL_REGISTRY=%q
+for reg in "${HARBOR_INTERNAL_REGISTRY}" "${REGISTRY}"; do
+  if [ -n "${reg}" ]; then
+    mkdir -p "/etc/containerd/certs.d/${reg}"
+    echo "${CADATA}" | openssl base64 -A -d > "/etc/containerd/certs.d/${reg}/ca.crt"
+  fi
+done
+if [ -d /usr/local/share/ca-certificates ]; then
+  echo "${CADATA}" | openssl base64 -A -d > /usr/local/share/ca-certificates/gdc-ca.crt
+fi
+if [ -d /etc/pki/trust/anchors ]; then
+  echo "${CADATA}" | openssl base64 -A -d > /etc/pki/trust/anchors/gdc-ca.crt
+fi
+if command -v update-ca-certificates >/dev/null 2>&1; then
+  update-ca-certificates
+fi`
 
 	s := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -352,7 +381,7 @@ echo ${CADATA} | openssl base64 -A -d > /etc/containerd/certs.d/${REGISTRY}/ca.c
 		},
 	}
 	s.Data = map[string][]byte{
-		"script": []byte(fmt.Sprintf(script, spec.RegistryURL, spec.CAData)),
+		"script": []byte(fmt.Sprintf(script, spec.RegistryURL, spec.CAData, harborInternalRegistry)),
 	}
 	if err := c.Create(ctx, s); err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("failed to create CA setup secret for %q in namespace: %q, %w", machine.Name, spec.Project, err)
