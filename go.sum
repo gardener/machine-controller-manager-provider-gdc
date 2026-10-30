@@ -179,10 +179,10 @@ github.com/fxamacker/cbor/v2 v2.9.4 h1:xwjVlxEMR3S605oUlgBjKLTTeGFciYPGYCtF/35LK
 github.com/fxamacker/cbor/v2 v2.9.4/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/gardener/cert-management v0.19.0 h1:BNumdw748Pg9798NzxHmmpKuXFRLHSPuvcPKQHOiFcw=
 github.com/gardener/cert-management v0.19.0/go.mod h1:u5OKwiDyUdCuW9vhDV92ozCVkynXUBrYCMHr4rVNiCY=
-github.com/gardener/etcd-druid/api v0.39.0 h1:/EOXls5u2l11XL6Ejdc9l+bSGBUEDdENPVMxKKZboJI=
-github.com/gardener/etcd-druid/api v0.39.0/go.mod h1:HsqEM/h4XuxPC4cFDm20V9TPAUqv0tjtnzds/nZ5p7Y=
-github.com/gardener/gardener v1.154.0 h1:JydoG2652n9za9DNwXkjVX80qsvdGjMAbIRr0bzWmoE=
-github.com/gardener/gardener v1.154.0/go.mod h1:IeWy7bwQ388HkfHCZRKc6Mnt41A4lngKxoqQJk/GFxo=
+github.com/gardener/etcd-druid/api v0.39.1 h1:v7XO4576QEyeWFa29GDqK4zBsbeSJBiUBrOEiYgLxsk=
+github.com/gardener/etcd-druid/api v0.39.1/go.mod h1:HsqEM/h4XuxPC4cFDm20V9TPAUqv0tjtnzds/nZ5p7Y=
+github.com/gardener/gardener v1.154.1 h1:S4yA3BtcitKwz1ad1V41nBkDrqp5+h26Hf5Wfs2zyqg=
+github.com/gardener/gardener v1.154.1/go.mod h1:YkU1OMO71Svw88BRaHIYMvHR3QgERBK4Nw9VuI74FiY=
 github.com/gardener/gardener/pkg/apis v1.153.0 h1:xpfMMPIjP0z8F61URH5f868MpkjhenrhPeMpQ4YiwYo=
 github.com/gardener/gardener/pkg/apis v1.153.0/go.mod h1:KB8DbLjix1SO81uaHGNIcHcBV5awnnLGXMNulp5YaBo=
 github.com/gardener/machine-controller-manager v0.63.1 h1:OUlDDARMAqwIH2zyEvMmGTFqc/VgFc0bH1LskhLoGk8=
