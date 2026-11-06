@@ -21,6 +21,12 @@
       matchManagers: ['github-actions'],
       automerge: true,
     },
+    // dockerfile: auto-merge minor, patch, digest, and pinDigest updates
+    {
+      matchManagers: ['dockerfile'],
+      matchUpdateTypes: ['minor', 'patch', 'digest', 'pinDigest'],
+      automerge: true,
+    },
     // gomod: non-gardener, non-provider
     {
       matchManagers: ['gomod'],
@@ -71,14 +77,29 @@
       groupName: 'provider-sdk-dependencies',
       matchUpdateTypes: ['major'],
     },
-    // gomod: gardener dependencies — manual only
+    // gomod: gardener dependencies
     {
       matchManagers: ['gomod'],
       matchPackageNames: [
         'github.com/gardener/gardener',
         'github.com/gardener/gardener/**',
       ],
+      matchDepTypes: ['require', 'indirect'],
+      enabled: true,
       groupName: 'gardener-dependencies',
+      matchUpdateTypes: ['minor', 'patch', 'digest'],
+      automerge: true,
+    },
+    {
+      matchManagers: ['gomod'],
+      matchPackageNames: [
+        'github.com/gardener/gardener',
+        'github.com/gardener/gardener/**',
+      ],
+      matchDepTypes: ['require', 'indirect'],
+      enabled: true,
+      groupName: 'gardener-dependencies',
+      matchUpdateTypes: ['major'],
     },
     // Disable ignored packages from dependabot ignore list
     {
