@@ -40,7 +40,7 @@ require (
 )
 
 require (
-	github.com/gardener/gardener v1.155.0
+	github.com/gardener/gardener v1.155.1
 	github.com/gardener/machine-controller-manager v0.63.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/googlecloudplatform/google-distributed-cloud-apis v0.0.0-20260824201624-0c18fa0ddc04
@@ -55,7 +55,7 @@ require (
 	github.com/coder/quartz v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
-	github.com/gardener/pvc-autoscaler v0.3.2 // indirect
+	github.com/gardener/pvc-autoscaler v0.3.3 // indirect
 	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/go-metrics v0.5.4 // indirect
 	github.com/hashicorp/go-msgpack/v2 v2.1.5 // indirect
