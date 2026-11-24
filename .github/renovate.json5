@@ -16,17 +16,31 @@
   prFooter: '**Release note**:\n```other dependency\nNONE\n```',
   rebaseWhen: 'conflicted',
   dependencyDashboard: false,
+  schedule: ['before 6am on monday'],
+  timezone: 'America/Los_Angeles',
+  vulnerabilityAlerts: {
+    schedule: ['at any time'],
+  },
   packageRules: [
-    // github-actions: auto-merge all updates
+    // github-actions + dockerfile: batch routine updates into one weekly PR
     {
-      matchManagers: ['github-actions'],
+      matchManagers: ['github-actions', 'dockerfile'],
+      matchUpdateTypes: ['minor', 'patch', 'digest', 'pinDigest'],
+      groupName: 'weekly-tooling-and-docker',
       automerge: true,
     },
-    // dockerfile: auto-merge minor, patch, digest, and pinDigest updates
+    // github-actions: keep major updates grouped separately while preserving automerge
+    {
+      matchManagers: ['github-actions'],
+      matchUpdateTypes: ['major'],
+      groupName: 'github-actions-major',
+      automerge: true,
+    },
+    // dockerfile: group major updates for manual review
     {
       matchManagers: ['dockerfile'],
-      matchUpdateTypes: ['minor', 'patch', 'digest', 'pinDigest'],
-      automerge: true,
+      matchUpdateTypes: ['major'],
+      groupName: 'docker-major',
     },
     // gomod: non-gardener, non-provider
     {
