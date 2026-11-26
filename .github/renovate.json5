@@ -29,12 +29,11 @@
       groupName: 'weekly-tooling-and-docker',
       automerge: true,
     },
-    // github-actions: keep major updates grouped separately while preserving automerge
+    // github-actions: group major updates for manual review
     {
       matchManagers: ['github-actions'],
       matchUpdateTypes: ['major'],
       groupName: 'github-actions-major',
-      automerge: true,
     },
     // dockerfile: group major updates for manual review
     {

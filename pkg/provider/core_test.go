@@ -18,6 +18,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -101,7 +104,7 @@ func TestProvider_CreateMachine(t *testing.T) {
 										SizeGB:     100,
 									}},
 									RegistryURL:  "10.200.9.2:10443",
-									CAData:       "fake-cert",
+									CAData:       "ZmFrZS1jZXJ0",
 									EnableEgress: nil,
 								}
 								raw, _ := json.Marshal(spec)
@@ -821,7 +824,7 @@ func TestProvider_CreateMachine_WithRegistry(t *testing.T) {
 									}},
 									OrgClusterURL: "org-cluster-url",
 									RegistryURL:   "10.200.9.2:10443",
-									CAData:        "fake-cert",
+									CAData:        "ZmFrZS1jZXJ0",
 									SubnetName:    "test-subnet",
 								}
 								raw, _ := json.Marshal(spec)
@@ -1714,29 +1717,13 @@ func TestProvider_TestListMachines(t *testing.T) {
 			wantVMs: wantVMs,
 		},
 		{
-			name: "successfully list machines in Namespace 1 with no labels",
-			initObjs: []client.Object{
-				fakeMachine1,
-				fakeMachine2,
-				fakeMachine3,
-			},
-			args: make_args("fake-ns-1", nil),
-			want: &driver.ListMachinesResponse{
-				MachineList: map[string]string{
-					"fake-machine-1": "fake-machine-1",
-					"fake-machine-3": "fake-machine-3",
-				},
-			},
-			wantVMs: wantVMs,
-		},
-		{
 			name: "successfully list empty machinelist with combination of namespace and labels where no matching vm is found",
 			initObjs: []client.Object{
 				fakeMachine1,
 				fakeMachine2,
 				fakeMachine3,
 			},
-			args: make_args("fake-ns-3", nil),
+			args: make_args("fake-ns-3", label1Only),
 			want: &driver.ListMachinesResponse{
 				MachineList: map[string]string{},
 			},
@@ -1807,12 +1794,25 @@ func TestProvider_ListMachinesErrors(t *testing.T) {
 				req: &driver.ListMachinesRequest{
 					MachineClass: &v1alpha1.MachineClass{
 						ProviderSpec: runtime.RawExtension{
-							Raw: []byte(`{}`),
+							Raw: []byte(`{"labels":{"fake-label1":"fake-label-val1"}}`),
 						},
 					},
 				},
 			},
 			wantErr: "unable to create client",
+		},
+		{
+			name: "refuses to list machines without labels",
+			args: args{
+				req: &driver.ListMachinesRequest{
+					MachineClass: &v1alpha1.MachineClass{
+						ProviderSpec: runtime.RawExtension{
+							Raw: []byte(`{"project":"fake-ns-1"}`),
+						},
+					},
+				},
+			},
+			wantErr: "has no providerSpec.labels to identify its VMs",
 		},
 	}
 	for _, tt := range tests {
@@ -2077,4 +2077,144 @@ func TestProvider_CreateMachine_VMRunningTimeoutSeconds_Errors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProvider_ListMachines_RequiresLabels(t *testing.T) {
+	for _, raw := range []string{`{"project":"fake-ns-1"}`, `{"project":"fake-ns-1","labels":{}}`} {
+		t.Run(raw, func(t *testing.T) {
+			spi := &mock.FakeSPI{
+				KubeClient: k8sfake.NewClientBuilder().
+					WithScheme(scheme()).
+					WithObjects(&vmv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "unrelated-vm", Namespace: "fake-ns-1"}}).
+					Build(),
+			}
+			p := &Provider{SPI: spi}
+			got, err := p.ListMachines(context.TODO(), &driver.ListMachinesRequest{
+				MachineClass: &v1alpha1.MachineClass{
+					ObjectMeta:   metav1.ObjectMeta{Name: "label-less"},
+					ProviderSpec: runtime.RawExtension{Raw: []byte(raw)},
+				},
+			})
+			if got != nil {
+				t.Errorf("Provider.ListMachines() = %v, want no response", got)
+			}
+			machineErr, ok := status.FromError(err)
+			if err == nil || !ok || machineErr.Code() != codes.InvalidArgument {
+				t.Fatalf("Provider.ListMachines() error = %v, want InvalidArgument", err)
+			}
+		})
+	}
+}
+
+func TestProvider_CreateMachine_RejectsRegistryPathTraversal(t *testing.T) {
+	c := k8sfake.NewClientBuilder().WithScheme(scheme()).Build()
+	p := &Provider{SPI: &mock.FakeSPI{KubeClient: c}}
+	raw, err := json.Marshal(api.ProviderSpec{Project: "fake-ns-1", RegistryURL: "../../../etc/ssl/certs", CAData: "ZmFrZS1jZXJ0"})
+	if err != nil {
+		t.Fatalf("failed to marshal provider spec: %v", err)
+	}
+
+	_, err = p.CreateMachine(context.TODO(), &driver.CreateMachineRequest{
+		Machine:      &v1alpha1.Machine{ObjectMeta: metav1.ObjectMeta{Name: "fake-machine-1"}},
+		MachineClass: &v1alpha1.MachineClass{ObjectMeta: metav1.ObjectMeta{Name: "fake-class"}, ProviderSpec: runtime.RawExtension{Raw: raw}},
+		Secret:       &corev1.Secret{Data: map[string][]byte{"userData": []byte("fake-bootstrap-content")}},
+	})
+	machineErr, ok := status.FromError(err)
+	if err == nil || !ok || machineErr.Code() != codes.InvalidArgument {
+		t.Fatalf("Provider.CreateMachine() error = %v, want InvalidArgument", err)
+	}
+
+	secrets := &corev1.SecretList{}
+	if err := c.List(context.TODO(), secrets); err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+	if len(secrets.Items) != 0 {
+		t.Errorf("expected no secrets to be created, got %d", len(secrets.Items))
+	}
+}
+
+func TestRenderCAInitScript(t *testing.T) {
+	const caData = "ZmFrZS1jZXJ0" // base64 of "fake-cert"
+
+	t.Run("renders quoted values", func(t *testing.T) {
+		got, err := renderCAInitScript("10.200.9.2:10443", caData)
+		if err != nil {
+			t.Fatalf("renderCAInitScript() error = %v", err)
+		}
+		want := `#!/bin/bash
+export REGISTRY='10.200.9.2:10443'
+export CADATA='ZmFrZS1jZXJ0'
+mkdir -p "/etc/containerd/certs.d/${REGISTRY}"
+echo "${CADATA}" | openssl base64 -A -d > "/etc/containerd/certs.d/${REGISTRY}/ca.crt"`
+		if got != want {
+			t.Errorf("renderCAInitScript() =\n%s\nwant\n%s", got, want)
+		}
+	})
+
+	t.Run("trims the registry and canonicalizes the CA data", func(t *testing.T) {
+		got, err := renderCAInitScript(" registry.example.com \n", "ZmFr\nZS1j\nZXJ0\n")
+		if err != nil {
+			t.Fatalf("renderCAInitScript() error = %v", err)
+		}
+		for _, want := range []string{"export REGISTRY='registry.example.com'\n", "export CADATA='ZmFrZS1jZXJ0'\n"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("renderCAInitScript() =\n%s\nwant it to contain %q", got, want)
+			}
+		}
+	})
+
+	t.Run("rejects path traversal and invalid CA data", func(t *testing.T) {
+		for _, tt := range []struct{ registry, caData string }{
+			{"../../../etc/ssl/certs", caData},
+			{"registry.example.com/../../x", caData},
+			{"registry.example.com", "not base64!"},
+			{"registry.example.com", "$(id)"},
+		} {
+			if _, err := renderCAInitScript(tt.registry, tt.caData); err == nil {
+				t.Errorf("renderCAInitScript(%q, %q) expected an error", tt.registry, tt.caData)
+			}
+		}
+	})
+
+	t.Run("shell metacharacters stay inert when the script runs", func(t *testing.T) {
+		bash, err := exec.LookPath("bash")
+		if err != nil {
+			t.Skip("bash is not available")
+		}
+		if _, err := exec.LookPath("openssl"); err != nil {
+			t.Skip("openssl is not available")
+		}
+		dir := t.TempDir()
+		marker := filepath.Join(dir, "marker")
+		certsDir := filepath.Join(dir, "certs.d")
+		for _, registry := range []string{
+			"registry.example.com:443",
+			"registry.example.com$(touch " + marker + ")",
+			"registry.example.com\x60touch " + marker + "\x60",
+			"registry.example.com'; touch " + marker + "; echo '",
+			"registry.example.com\x22; touch " + marker + "; echo \x22",
+			"registry.example.com with spaces",
+		} {
+			script, err := renderCAInitScript(registry, caData)
+			if err != nil {
+				t.Fatalf("renderCAInitScript(%q) error = %v", registry, err)
+			}
+			// Run the script against a scratch directory instead of /etc/containerd/certs.d.
+			script = strings.ReplaceAll(script, "/etc/containerd/certs.d", certsDir)
+			cmd := exec.Command(bash, "-c", script) // #nosec G204 -- runs the rendered script against a scratch directory
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("script failed for registry %q: %v\n%s", registry, err, out)
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Fatalf("registry %q was executed as shell code", registry)
+			}
+			got, err := os.ReadFile(filepath.Join(certsDir, registry, "ca.crt"))
+			if err != nil {
+				t.Fatalf("CA file for registry %q was not written: %v", registry, err)
+			}
+			if string(got) != "fake-cert" {
+				t.Errorf("CA file for registry %q = %q, want %q", registry, got, "fake-cert")
+			}
+		}
+	})
 }

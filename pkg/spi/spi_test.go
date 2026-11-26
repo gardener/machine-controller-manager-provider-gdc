@@ -72,6 +72,69 @@ func TestPluginSPIImpl_Client(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "successfully create client with an https token_uri",
+			p:    &PluginSPIImpl{},
+			args: args{
+				secret: &v1.Secret{
+					Data: map[string][]byte{
+						"serviceaccount.json": []byte(`{"token_uri": "https://service-accounts.example.com/authenticate"}`),
+					},
+				},
+				spec: &api.ProviderSpec{
+					OrgClusterURL: "global.com",
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "failed to create client with a plain http token_uri",
+			p:    &PluginSPIImpl{},
+			args: args{
+				secret: &v1.Secret{
+					Data: map[string][]byte{
+						"serviceaccount.json": []byte(`{"token_uri": "http://service-accounts.example.com/authenticate"}`),
+					},
+				},
+				spec: &api.ProviderSpec{
+					OrgClusterURL: "global.com",
+				},
+			},
+			wantErr:      true,
+			errorMessage: "token_uri must use https scheme",
+		},
+		{
+			name: "failed to create client with a link-local token_uri",
+			p:    &PluginSPIImpl{},
+			args: args{
+				secret: &v1.Secret{
+					Data: map[string][]byte{
+						"serviceaccount.json": []byte(`{"token_uri": "https://169.254.169.254/authenticate"}`),
+					},
+				},
+				spec: &api.ProviderSpec{
+					OrgClusterURL: "global.com",
+				},
+			},
+			wantErr:      true,
+			errorMessage: "must not target loopback, link-local",
+		},
+		{
+			name: "failed to create client with a localhost token_uri",
+			p:    &PluginSPIImpl{},
+			args: args{
+				secret: &v1.Secret{
+					Data: map[string][]byte{
+						"serviceaccount.json": []byte(`{"token_uri": "https://localhost/authenticate"}`),
+					},
+				},
+				spec: &api.ProviderSpec{
+					OrgClusterURL: "global.com",
+				},
+			},
+			wantErr:      true,
+			errorMessage: "must not target localhost",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

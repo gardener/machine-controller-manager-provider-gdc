@@ -29,7 +29,7 @@ const (
 	cleanupTimeout      = 10 * time.Minute
 	verificationTimeout = 15 * time.Minute
 	// Resource Names
-	mcmSecretName = "mcm-presubmit-secret"
+	mcmSecretName = "mcm-presubmit-secret" // #nosec G101 -- Kubernetes Secret object name for tests, not a credential
 	mcmAppName    = "machine-controller-manager"
 	dummyUserData = `
         #cloud-config
@@ -38,6 +38,10 @@ const (
         - touch /tmp/mcm-test-verification
     `
 )
+
+// defaultRegistryURL makes the driver render the registry CA init script for the test VM.
+// Nothing is pulled from it: the script only installs the CA for this endpoint.
+const defaultRegistryURL = "registry.mcm-presubmit.invalid:8443"
 
 // Config holds the CLI flag configuration for the presubmit integration test.
 type Config struct {
@@ -108,7 +112,7 @@ func init() {
 	flag.StringVar(&cfg.SAFile, "service_account", "", "Path to Service Account file")
 	flag.StringVar(&cfg.GdcMCMImageTag, "gdc_mcm_image_tag", "", "MCM image tag (image:tag)")
 	flag.StringVar(&cfg.MCMImageTag, "mcm_image_tag", "", "MCM image tag (image:tag)")
-	flag.StringVar(&cfg.RegistryURL, "registry_url", "", "Harbor Registry URL")
+	flag.StringVar(&cfg.RegistryURL, "registry_url", defaultRegistryURL, "Registry endpoint whose CA the VM installs for containerd; set it to an empty string to create the VM without the CA init script")
 	flag.StringVar(&cfg.MachineImage, "machine_image", "", "Virtual Machine image")
 	flag.StringVar(&cfg.MachineType, "machine_type", "", "Virtual Machine type")
 }

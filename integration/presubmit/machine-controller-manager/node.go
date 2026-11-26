@@ -14,8 +14,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,7 +174,136 @@ func verifyGDCResources(ctx context.Context, t *testing.T, env *TestEnv) error {
 		return fmt.Errorf("UserData mismatch!\nExpected: %q\nActual:   %q", dummyUserData, userDataString)
 	}
 	t.Log("VirtualMachine is Running and UserData verification passed.")
+	if cfg.RegistryURL != "" {
+		if err := verifyCAInitScript(ctx, t, env, vmName); err != nil {
+			return fmt.Errorf("failed to verify the registry CA init script: %w", err)
+		}
+		t.Log("Registry CA init script verification passed.")
+	}
 	return nil
+}
+
+// caInitScriptSecretName returns the name of the secret that holds the registry CA init
+// script of a VM.
+func caInitScriptSecretName(vmName string) string {
+	return vmName + "-cainit-script"
+}
+
+// verifyCAInitScript checks that the VM runs the registry CA init script before the user
+// data, that the script secret is owned by the VM, and that the stored script installs
+// exactly the CA bundle of the MachineClass for the configured registry.
+func verifyCAInitScript(ctx context.Context, t *testing.T, env *TestEnv, vmName string) error {
+	t.Helper()
+	t.Log("Verifying the registry CA init script of the VM...")
+	vm := &vmv1.VirtualMachine{}
+	if err := env.MgmtClient.Get(ctx, types.NamespacedName{Name: vmName, Namespace: env.Project}, vm); err != nil {
+		return fmt.Errorf("failed to get VirtualMachine %q: %w", vmName, err)
+	}
+
+	secretName := caInitScriptSecretName(vmName)
+	wantScripts := []string{"caInit=" + secretName, "userData=" + vmName + "-init-script"}
+	gotScripts := make([]string, 0, len(vm.Spec.StartupScripts))
+	for _, script := range vm.Spec.StartupScripts {
+		ref := ""
+		if script.ScriptSecretRef != nil {
+			ref = script.ScriptSecretRef.Name
+		}
+		gotScripts = append(gotScripts, script.Name+"="+ref)
+	}
+	if !slices.Equal(gotScripts, wantScripts) {
+		return fmt.Errorf("startup scripts of VirtualMachine %q are %v, want %v", vmName, gotScripts, wantScripts)
+	}
+
+	// The driver sets the owner reference right after it created the VM, so that the
+	// script is removed together with the VM.
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{Name: secretName, Namespace: env.Project}
+	if err := wait.PollUntilContextTimeout(ctx, 5*time.Second, time.Minute, true, func(ctx context.Context) (bool, error) {
+		if err := env.MgmtClient.Get(ctx, secretKey, secret); err != nil {
+			t.Logf("Waiting for CA init script secret %q: %v", secretName, err)
+			return false, nil
+		}
+		for _, owner := range secret.OwnerReferences {
+			if owner.UID == vm.UID {
+				return true, nil
+			}
+		}
+		t.Logf("Waiting for CA init script secret %q to be owned by VirtualMachine %q", secretName, vmName)
+		return false, nil
+	}); err != nil {
+		return fmt.Errorf("CA init script secret %q does not exist or is not owned by VirtualMachine %q: %w", secretName, vmName, err)
+	}
+
+	script, ok := secret.Data["script"]
+	if !ok {
+		return fmt.Errorf("cannot find 'script' key in secret %s", secretName)
+	}
+	caBundle, err := base64.StdEncoding.DecodeString(env.GDCConfig.CAData)
+	if err != nil {
+		return fmt.Errorf("failed to decode the CA data of the MachineClass: %w", err)
+	}
+	return runCAInitScript(t, string(script), cfg.RegistryURL, caBundle)
+}
+
+// runCAInitScript executes the CA init script the way the VM does, except that it writes
+// below a scratch directory instead of /etc/containerd/certs.d, and compares the CA file
+// for the registry with the expected bundle.
+func runCAInitScript(t *testing.T, script, registry string, wantCA []byte) error {
+	t.Helper()
+	const certsDir = "/etc/containerd/certs.d"
+	if !strings.Contains(script, certsDir) {
+		return fmt.Errorf("CA init script does not write below %s:\n%s", certsDir, script)
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		return fmt.Errorf("bash is required to run the CA init script: %w", err)
+	}
+	if _, err := exec.LookPath("openssl"); err != nil {
+		return fmt.Errorf("openssl is required to run the CA init script: %w", err)
+	}
+	scratchDir := filepath.Join(t.TempDir(), "certs.d")
+	// #nosec G204 -- runs the script the driver rendered from this test's own MachineClass against a scratch directory
+	cmd := exec.Command(bash, "-c", strings.ReplaceAll(script, certsDir, scratchDir))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("CA init script failed: %w\n%s", err, out)
+	}
+	caFile := filepath.Join(scratchDir, registry, "ca.crt")
+	gotCA, err := os.ReadFile(caFile) // #nosec G304 -- path below the test's own temporary directory
+	if err != nil {
+		return fmt.Errorf("CA init script did not write the CA file for registry %q: %w", registry, err)
+	}
+	if !bytes.Equal(gotCA, wantCA) {
+		return fmt.Errorf("CA file written for registry %q has %d bytes and differs from the CA bundle of the MachineClass (%d bytes)", registry, len(gotCA), len(wantCA))
+	}
+	return nil
+}
+
+// waitForCAInitScriptDeletion waits until the CA init script secret of a deleted VM is gone.
+// If it is still there after the timeout it is deleted, so that test runs do not pile up
+// secrets in the project, and an error is returned.
+func waitForCAInitScriptDeletion(ctx context.Context, t *testing.T, env *TestEnv, vmName string) error {
+	t.Helper()
+	secretKey := types.NamespacedName{Name: caInitScriptSecretName(vmName), Namespace: env.Project}
+	secret := &corev1.Secret{}
+	pollErr := wait.PollUntilContextTimeout(ctx, 5*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		err := env.MgmtClient.Get(ctx, secretKey, secret)
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			t.Logf("Transient error getting CA init script secret %q: %v", secretKey.Name, err)
+		}
+		return false, nil
+	})
+	if pollErr == nil {
+		t.Logf("CA init script secret %q was removed with the VirtualMachine.", secretKey.Name)
+		return nil
+	}
+	secret.Name, secret.Namespace = secretKey.Name, secretKey.Namespace
+	if err := env.MgmtClient.Delete(ctx, secret); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("CA init script secret %q was not removed with VirtualMachine %q and could not be deleted: %w", secretKey.Name, vmName, err)
+	}
+	return fmt.Errorf("CA init script secret %q was not removed with VirtualMachine %q; deleted it", secretKey.Name, vmName)
 }
 
 // waitForVMDeletion waits until the VirtualMachine is fully deleted from the API.

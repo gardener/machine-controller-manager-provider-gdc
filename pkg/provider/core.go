@@ -17,6 +17,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,7 +94,11 @@ func (p *Provider) CreateMachine(ctx context.Context, req *driver.CreateMachineR
 	var caInitScriptSecret *corev1.Secret
 	// if vm uses image from RegistryURL, need to specify cert to authorize
 	if spec.RegistryURL != "" && spec.CAData != "" {
-		caInitScriptSecret, err = p.createCAInitScriptSecret(ctx, kubeClient, req.Machine, spec)
+		caInitScript, renderErr := renderCAInitScript(spec.RegistryURL, spec.CAData)
+		if renderErr != nil {
+			return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("invalid registry configuration in MachineClass %q: %v", req.MachineClass.Name, renderErr))
+		}
+		caInitScriptSecret, err = p.createCAInitScriptSecret(ctx, kubeClient, req.Machine, spec, caInitScript)
 		if err != nil {
 			return nil, wrapError(err)
 		}
@@ -339,13 +344,39 @@ func (p *Provider) createSecret(ctx context.Context, c client.Client, machine *v
 	return s, nil
 }
 
-func (p *Provider) createCAInitScriptSecret(ctx context.Context, c client.Client, machine *v1alpha1.Machine, spec *api.ProviderSpec) (*corev1.Secret, error) {
-	script := `#!/bin/bash
-export REGISTRY=%q
-export CADATA=%q
-mkdir -p /etc/containerd/certs.d/${REGISTRY}
-echo ${CADATA} | openssl base64 -A -d > /etc/containerd/certs.d/${REGISTRY}/ca.crt`
+// caInitScriptTemplate installs the registry CA for containerd before the kubelet starts.
+// The script runs as root on every new node, so both values are inserted as single-quoted
+// shell words and every expansion is quoted: MachineClass content can neither change the
+// control flow of the script nor be split into several words.
+const caInitScriptTemplate = `#!/bin/bash
+export REGISTRY=%s
+export CADATA=%s
+mkdir -p "/etc/containerd/certs.d/${REGISTRY}"
+echo "${CADATA}" | openssl base64 -A -d > "/etc/containerd/certs.d/${REGISTRY}/ca.crt"`
 
+// renderCAInitScript returns the CA init script for the given registry endpoint and
+// base64-encoded CA bundle.
+func renderCAInitScript(registryURL, caData string) (string, error) {
+	registry := strings.TrimSpace(registryURL)
+	for _, element := range strings.Split(registry, "/") {
+		if element == ".." {
+			return "", errors.New(`registryURL must not contain ".." path elements`)
+		}
+	}
+	// Decode and re-encode so that only canonical base64 characters reach the script.
+	decoded, err := base64.StdEncoding.DecodeString(caData)
+	if err != nil {
+		return "", errors.New("caData must be base64 encoded")
+	}
+	return fmt.Sprintf(caInitScriptTemplate, shellQuote(registry), shellQuote(base64.StdEncoding.EncodeToString(decoded))), nil
+}
+
+// shellQuote returns s as a single-quoted POSIX shell word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func (p *Provider) createCAInitScriptSecret(ctx context.Context, c client.Client, machine *v1alpha1.Machine, spec *api.ProviderSpec, script string) (*corev1.Secret, error) {
 	s := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      caInitScriptSecretName(machine.Name),
@@ -353,7 +384,7 @@ echo ${CADATA} | openssl base64 -A -d > /etc/containerd/certs.d/${REGISTRY}/ca.c
 		},
 	}
 	s.Data = map[string][]byte{
-		"script": []byte(fmt.Sprintf(script, spec.RegistryURL, spec.CAData)),
+		"script": []byte(script),
 	}
 	if err := c.Create(ctx, s); err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("failed to create CA setup secret for %q in namespace: %q, %w", machine.Name, spec.Project, err)
@@ -487,11 +518,15 @@ func (p *Provider) ListMachines(ctx context.Context, req *driver.ListMachinesReq
 		return nil, status.Error(codes.InvalidArgument, errMsg)
 	}
 
+	// The labels are the only way to tell which VMs belong to this MachineClass. An empty
+	// selector would match every VM in the project, and orphan collection deletes every
+	// listed VM that has no Machine object.
+	if len(spec.Labels) == 0 {
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("MachineClass %q has no providerSpec.labels to identify its VMs", req.MachineClass.Name))
+	}
+
 	vmList := &vmv1.VirtualMachineList{}
 	vmLabels := spec.Labels
-	if vmLabels == nil {
-		vmLabels = map[string]string{}
-	}
 
 	kubeClient, err := p.SPI.Client(req.Secret, spec)
 	if err != nil {

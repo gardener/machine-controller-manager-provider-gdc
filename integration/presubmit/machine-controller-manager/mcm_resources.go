@@ -135,6 +135,11 @@ func createMachineDeployment(ctx context.Context, t *testing.T, env *TestEnv, cl
 			if err := waitForVMDeletion(ctx, t, env, vmName); err != nil {
 				t.Errorf("Error waiting for VM deletion: %v", err)
 			}
+			if cfg.RegistryURL != "" {
+				if err := waitForCAInitScriptDeletion(ctx, t, env, vmName); err != nil {
+					t.Errorf("Error waiting for CA init script deletion: %v", err)
+				}
+			}
 		}
 		t.Log("All VirtualMachines deleted successfully.")
 	})
