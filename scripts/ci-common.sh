@@ -517,8 +517,8 @@ setup_gdc_credentials() {
   fi
 
   echo "Fetching GDC Root CA from console.${org}.${zone}.${lab_url}..."
-  if ! wget "https://console.${org}.${zone}.${lab_url}/.well-known/certificate-authority" \
-    --no-check-certificate -q -O "${ca_file}"; then
+  if ! retry_cmd wget "https://console.${org}.${zone}.${lab_url}/.well-known/certificate-authority" \
+    --no-check-certificate --timeout=10 --tries=2 -q -O "${ca_file}"; then
     echo "::error::Failed to fetch GDC Root CA from console.${org}.${zone}.${lab_url}"
     exit 1
   fi
@@ -549,18 +549,33 @@ install_gdcloud_cli() {
   elif [[ -x "${token_helper_pkg}" ]]; then
     token_helper_cmd=("${token_helper_pkg}")
   fi
-  if ! sts_token=$("${token_helper_cmd[@]}" \
+  if ! sts_token=$(retry_cmd "${token_helper_cmd[@]}" \
     --service-account-file="${sa_file}" \
     --ca-cert-file="${ca_file}" \
     --audience="${mgmt_url}"); then
     echo "::error::Failed to mint STS token using token-helper against ${mgmt_url}"
     exit 1
   fi
+  if [[ "${GITHUB_ACTIONS:-}" == "true" && -n "${sts_token}" ]]; then
+    echo "::add-mask::${sts_token}"
+  fi
 
   echo "Resolving gdcloud CLI bundle URL (version: ${gdcloud_version}) from ${mgmt_url}..."
-  local serving_url
-  serving_url=$(curl -ksSL -H "Authorization: Bearer ${sts_token}" \
-    "${mgmt_url}/apis/artifactview.private.gdc.goog/v1alpha1/namespaces/ui-system/clibundlemetadata" | \
+  local auth_hdr_file clibundle_json serving_url
+  auth_hdr_file="$(mktemp /tmp/gdc-auth-hdr-XXXXXX)"
+  (
+    umask 077
+    printf 'Authorization: Bearer %s\n' "${sts_token}" > "${auth_hdr_file}"
+  )
+  if ! clibundle_json=$(retry_cmd curl -ksSL --fail --connect-timeout 5 --max-time 120 \
+    -H "@${auth_hdr_file}" \
+    "${mgmt_url}/apis/artifactview.private.gdc.goog/v1alpha1/namespaces/ui-system/clibundlemetadata"); then
+    rm -f "${auth_hdr_file}"
+    echo "::error::Failed to query CLIBundleMetadata from ${mgmt_url}"
+    exit 1
+  fi
+  rm -f "${auth_hdr_file}"
+  serving_url=$(printf '%s' "${clibundle_json}" | \
     jq -r --arg ver "${gdcloud_version}" '
       [.items[]
        | select(.platform.os == "linux" and .platform.architecture == "amd64")
@@ -578,7 +593,7 @@ install_gdcloud_cli() {
 
   local tarball="/tmp/gdcloud_cli_linux.tar.gz"
   echo "Downloading gdcloud CLI from ${serving_url}..."
-  curl -kL --fail --retry 3 "${serving_url}?uncompressed=false" -o "${tarball}"
+  retry_cmd curl -kL --fail --connect-timeout 5 --retry 3 "${serving_url}?uncompressed=false" -o "${tarball}"
 
   local sudo_cmd=""
   if [[ "${EUID:-$(id -u)}" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
@@ -625,4 +640,19 @@ delete_ghcr_image_tag() {
       return 0
     fi
   done
+}
+
+# retry_cmd retries a command up to 3 times with backoff on transient failures.
+retry_cmd() {
+  local attempt
+  for attempt in 1 2 3; do
+    if "$@"; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt 3 ]]; then
+      echo "Command '$*' failed on attempt ${attempt}; retrying in $((attempt * 5))s..." >&2
+      sleep $((attempt * 5))
+    fi
+  done
+  return 1
 }

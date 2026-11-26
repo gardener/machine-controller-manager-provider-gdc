@@ -50,8 +50,8 @@ unset GDC_MCM_SERVICE_ACCOUNT_KEY
 install_gdcloud_cli "${SA_FILE}" "${CA_FILE}" "${MGMT_URL}" "${GDCLOUD_VERSION}" "./integration/cmd/token-helper"
 
 echo "Building and pushing provider image ${IMAGE_WITHTAG}..."
-make docker-images IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" IMAGE_TAG="${IMAGE_TAG}"
-docker push "${IMAGE_WITHTAG}"
+retry_cmd make docker-images IMAGE_REPOSITORY="${IMAGE_REPOSITORY}" IMAGE_TAG="${IMAGE_TAG}"
+retry_cmd docker push "${IMAGE_WITHTAG}"
 IMAGE_PUSHED=true
 
 echo "Running MCM presubmit integration test..."
