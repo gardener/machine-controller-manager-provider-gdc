@@ -18,6 +18,9 @@ package spi
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"strings"
 
 	vmv1 "github.com/googlecloudplatform/google-distributed-cloud-apis/pkg/apis/public/virtualmachine/v1"
 	v1 "k8s.io/api/core/v1"
@@ -84,5 +87,38 @@ func getServiceAccountFromSecret(secret *v1.Secret) (*auth.ServiceAccount, error
 	if err := json.Unmarshal(data, serviceAccount); err != nil {
 		return nil, fmt.Errorf("failed to parse service account, %w", err)
 	}
+	if serviceAccount.TokenURI != "" {
+		if err := validateTokenURI(serviceAccount.TokenURI); err != nil {
+			return nil, err
+		}
+	}
 	return serviceAccount, nil
+}
+
+// validateTokenURI rejects token endpoints that the token exchange must not be sent to.
+func validateTokenURI(rawURI string) error {
+	parsed, err := url.Parse(rawURI)
+	if err != nil {
+		return fmt.Errorf("invalid service account token_uri")
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("service account token_uri must use https scheme")
+	}
+	host := parsed.Hostname()
+	if parsed.Host == "" || host == "" {
+		return fmt.Errorf("service account token_uri must specify a host")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("service account token_uri must not contain userinfo or fragment")
+	}
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".localhost") {
+		return fmt.Errorf("service account token_uri must not target localhost")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("service account token_uri must not target loopback, link-local, or unspecified IP addresses")
+		}
+	}
+	return nil
 }

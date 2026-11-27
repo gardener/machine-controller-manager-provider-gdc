@@ -30,10 +30,14 @@ import (
 	"k8s.io/utils/clock"
 )
 
+// #nosec G101 -- RFC 8693 OAuth 2.0 token-type URN constants, not credentials
 const (
 	tokenExchangeType       = "urn:ietf:params:oauth:token-type:token-exchange"
 	accessTokenType         = "urn:ietf:params:oauth:token-type:access_token"
 	serviceAccountTokenType = "urn:k8s:params:oauth:token-type:serviceaccount"
+
+	maxSTSResponseBytes  = 1 << 20
+	maxSTSErrorBodyBytes = 4 << 10
 )
 
 type Option func(*optionalConfig)
@@ -75,11 +79,15 @@ func NewSTSTokenSource(
 	jwtTS := newJWTTokenSource(saConfig)
 
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
 	if len(cfg.caCert) != 0 {
 		caCertPool := x509.NewCertPool()
 		caCertPool.AppendCertsFromPEM(cfg.caCert)
-		tr.TLSClientConfig = &tls.Config{RootCAs: caCertPool}
+		tlsCfg.RootCAs = caCertPool
 	}
+	tr.TLSClientConfig = tlsCfg
 
 	return &stsTokenSource{
 		tokenURI:       saConfig.TokenURI,
@@ -153,16 +161,20 @@ func (ts *stsTokenSource) Token() (*oauth2.Token, error) {
 			return fmt.Errorf("fetch token: %w", doErr)
 		}
 		var readErr error
-		respBody, readErr = io.ReadAll(resp.Body)
-		resp.Body.Close()
+		respBody, readErr = io.ReadAll(io.LimitReader(resp.Body, maxSTSResponseBytes))
+		_ = resp.Body.Close()
 		if readErr != nil {
 			return fmt.Errorf("read fetched token: %w", readErr)
 		}
 		if resp.StatusCode >= http.StatusInternalServerError {
+			errBody := respBody
+			if len(errBody) > maxSTSErrorBodyBytes {
+				errBody = errBody[:maxSTSErrorBodyBytes]
+			}
 			// Retry on HTTP 5xx server errors; 4xx client errors do not retry.
 			return &oauth2.RetrieveError{
 				Response: resp,
-				Body:     respBody,
+				Body:     errBody,
 			}
 		}
 		return nil
@@ -172,9 +184,13 @@ func (ts *stsTokenSource) Token() (*oauth2.Token, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		errBody := respBody
+		if len(errBody) > maxSTSErrorBodyBytes {
+			errBody = errBody[:maxSTSErrorBodyBytes]
+		}
 		return nil, &oauth2.RetrieveError{
 			Response: resp,
-			Body:     respBody,
+			Body:     errBody,
 		}
 	}
 
