@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -87,9 +88,17 @@ func bootstrapTestEnv(_ context.Context, t *testing.T) (*TestEnv, error) {
 		OrgClusterURL: fmt.Sprintf("https://management-kube.apiserver.%s.%s.%s", cfg.Org, cfg.Zone, cfg.LabURL),
 		CAData:        base64.StdEncoding.EncodeToString(caData),
 	}
-	// Initialize GDCloud CLI and cluster client
+	// Initialize GDCloud CLI and cluster client with bounded retries on transient VIP resets.
 	consoleURL := fmt.Sprintf("https://console.%s.%s.%s", cfg.Org, cfg.Zone, cfg.LabURL)
-	gdcClient, err := gdcloud.NewTestingClient(cfg.CAFile, cfg.SAFile, consoleURL)
+	var gdcClient *gdcloud.TestingClient
+	for attempt := 1; attempt <= 4; attempt++ {
+		gdcClient, err = gdcloud.NewTestingClient(cfg.CAFile, cfg.SAFile, consoleURL)
+		if err == nil {
+			break
+		}
+		t.Logf("Transient error initializing gdcloud client (attempt %d/4): %v", attempt, err)
+		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gdcloud init failed: %v", err)
 	}
@@ -130,8 +139,16 @@ func installCRDs(ctx context.Context, t *testing.T, vucClient client.WithWatch) 
 	// share the gardener-github-ci VUC, and deleting the CRDs on exit wipes out custom
 	// resources belonging to any concurrent test run. Namespaced Machine* objects are
 	// cleaned up by createMachineDeployment/createMachineClass and namespace deletion.
-	if err := mcmDeployer.Deploy(ctx); err != nil {
-		return fmt.Errorf("failed to deploy CRDs: %v", err)
+	var lastErr error
+	if err := wait.PollUntilContextTimeout(ctx, 3*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		if deployErr := mcmDeployer.Deploy(ctx); deployErr != nil {
+			lastErr = deployErr
+			t.Logf("Transient error deploying MCM CRDs: %v", deployErr)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		return fmt.Errorf("failed to deploy CRDs: %v (poll err: %w)", lastErr, err)
 	}
 	return nil
 }
@@ -147,8 +164,40 @@ func createNamespace(ctx context.Context, t *testing.T, testEnv TestEnv) error {
 	})
 
 	t.Logf("Creating Namespace in VUC: %s", testEnv.Namespace)
-	if err := kubernetes.CreateNamespace(ctx, testEnv.VucClient, testEnv.Namespace); err != nil {
-		return err
+	var lastErr error
+	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		createErr := kubernetes.CreateNamespace(ctx, testEnv.VucClient, testEnv.Namespace)
+		if createErr == nil || errors.IsAlreadyExists(createErr) {
+			return true, nil
+		}
+		lastErr = createErr
+		t.Logf("Transient error creating namespace %q: %v", testEnv.Namespace, createErr)
+		return false, nil
+	}); err != nil {
+		return fmt.Errorf("failed to create namespace %q: %v (poll err: %w)", testEnv.Namespace, lastErr, err)
+	}
+	return nil
+}
+
+func createIdempotent(ctx context.Context, t *testing.T, c client.Client, obj client.Object, desc string) error {
+	t.Helper()
+	var lastErr error
+	if err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		copied, ok := obj.DeepCopyObject().(client.Object)
+		if !ok {
+			return false, fmt.Errorf("failed to deep-copy %s", desc)
+		}
+		if createErr := c.Create(ctx, copied); createErr != nil {
+			if errors.IsAlreadyExists(createErr) {
+				return true, nil
+			}
+			lastErr = createErr
+			t.Logf("Transient error creating %s: %v", desc, createErr)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		return fmt.Errorf("failed to create %s: %v (poll err: %w)", desc, lastErr, err)
 	}
 	return nil
 }
@@ -187,10 +236,7 @@ func createMCMSecret(ctx context.Context, t *testing.T, testEnv *TestEnv) error 
 	})
 
 	t.Logf("Creating Credential Secret: %s", secret.Name)
-	if err := testEnv.VucClient.Create(ctx, secret); err != nil {
-		return err
-	}
-	return nil
+	return createIdempotent(ctx, t, testEnv.VucClient, secret, "Credential Secret "+secret.Name)
 }
 
 func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
@@ -239,8 +285,8 @@ func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 		}
 	})
 
-	if err := testEnv.VucClient.Create(ctx, sa); err != nil {
-		return fmt.Errorf("failed to create ServiceAccount:  %w", err)
+	if err := createIdempotent(ctx, t, testEnv.VucClient, sa, "ServiceAccount "+sa.Name); err != nil {
+		return err
 	}
 
 	// 2. Create Shoot Cluster RBAC (Applied to VUC in this test)
@@ -296,8 +342,8 @@ func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 		}
 	})
 
-	if err := testEnv.VucClient.Create(ctx, shootCR); err != nil {
-		return fmt.Errorf("failed to create Shoot ClusterRole: %w", err)
+	if err := createIdempotent(ctx, t, testEnv.VucClient, shootCR, "Shoot ClusterRole "+shootCR.Name); err != nil {
+		return err
 	}
 
 	shootCRB := &rbacv1.ClusterRoleBinding{
@@ -321,8 +367,8 @@ func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 		}
 	})
 
-	if err := testEnv.VucClient.Create(ctx, shootCRB); err != nil {
-		return fmt.Errorf("failed to create Shoot ClusterRoleBinding: %w", err)
+	if err := createIdempotent(ctx, t, testEnv.VucClient, shootCRB, "Shoot ClusterRoleBinding "+shootCRB.Name); err != nil {
+		return err
 	}
 
 	// 3. Create Seed Cluster RBAC (Applied to VUC in this test)
@@ -370,8 +416,8 @@ func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 		}
 	})
 
-	if err := testEnv.VucClient.Create(ctx, seedRole); err != nil {
-		return fmt.Errorf("failed to create Seed Role: %w", err)
+	if err := createIdempotent(ctx, t, testEnv.VucClient, seedRole, "Seed Role "+seedRole.Name); err != nil {
+		return err
 	}
 
 	seedRB := &rbacv1.RoleBinding{
@@ -396,8 +442,8 @@ func setupRBAC(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 		}
 	})
 
-	if err := testEnv.VucClient.Create(ctx, seedRB); err != nil {
-		return fmt.Errorf("failed to create Seed RoleBinding: %w", err)
+	if err := createIdempotent(ctx, t, testEnv.VucClient, seedRB, "Seed RoleBinding "+seedRB.Name); err != nil {
+		return err
 	}
 
 	return nil
@@ -492,8 +538,8 @@ func deployMCM(ctx context.Context, t *testing.T, testEnv *TestEnv) error {
 		}
 	})
 
-	if err := testEnv.VucClient.Create(ctx, deployment); err != nil {
-		return fmt.Errorf("failed to create Deployment: %w", err)
+	if err := createIdempotent(ctx, t, testEnv.VucClient, deployment, "Deployment "+deployment.Name); err != nil {
+		return err
 	}
 
 	// Wait for Readiness
